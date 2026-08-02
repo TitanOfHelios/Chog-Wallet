@@ -1,0 +1,139 @@
+import { useTheme2024 } from '@/hooks/theme';
+import { createGetStyles2024 } from '@/utils/styles';
+import { memo } from 'react';
+import { Pressable, View } from 'react-native';
+
+import {
+  AccountSwitcherAopProps,
+  useAccountSceneVisible,
+} from '@/components/AccountSwitcher/hooks';
+import {
+  useSceneAccountInfo,
+  useSwitchSceneCurrentAccount,
+  usePreFetchBeforeEnterScene,
+} from '@/hooks/accountsSwitcher';
+import { ellipsisAddress } from '@/utils/address';
+import useMount from 'react-use/lib/useMount';
+import { AddressItem } from '@/components2024/AddressItem/AddressItem';
+import { CaretArrowIconCC } from '@/components/Icons/CaretArrowIconCC';
+import { Text } from '@/components/Typography';
+
+function AccountSwitcherComponent({
+  forScene = 'TokenDetail',
+  disableSwitch = false,
+}: RNViewProps &
+  AccountSwitcherAopProps<{
+    disableSwitch?: boolean;
+  }>) {
+  const { colors2024, styles } = useTheme2024({ getStyle });
+
+  const { isVisible: isOpen, toggleSceneVisible } =
+    useAccountSceneVisible(forScene);
+  const { switchSceneCurrentAccount } = useSwitchSceneCurrentAccount();
+  const { isSceneUsingAllAccounts, finalSceneCurrentAccount } =
+    useSceneAccountInfo({
+      forScene,
+    });
+
+  const { preFetchData } = usePreFetchBeforeEnterScene();
+
+  useMount(() => {
+    if (!isSceneUsingAllAccounts) {
+      switchSceneCurrentAccount(forScene, finalSceneCurrentAccount, {
+        maybeReEntrant: true,
+      });
+    }
+  });
+
+  return (
+    <Pressable
+      style={styles.container}
+      disabled={disableSwitch}
+      onPress={() => {
+        const nextOpen = !isOpen;
+        toggleSceneVisible(forScene, nextOpen);
+        if (nextOpen) {
+          preFetchData();
+        }
+      }}>
+      {!!finalSceneCurrentAccount && (
+        <AddressItem
+          style={styles.addressItem}
+          account={finalSceneCurrentAccount}>
+          {({ WalletIcon }) => {
+            return (
+              <View style={styles.addressRow}>
+                <WalletIcon style={styles.walletIcon} />
+                <Text
+                  numberOfLines={1}
+                  ellipsizeMode="tail"
+                  style={styles.address}>
+                  {finalSceneCurrentAccount.aliasName ||
+                    ellipsisAddress(finalSceneCurrentAccount?.address)}
+                </Text>
+              </View>
+            );
+          }}
+        </AddressItem>
+      )}
+      {!disableSwitch && (
+        <CaretArrowIconCC
+          dir="down"
+          style={styles.addressCaretIcon}
+          width={18}
+          height={18}
+          bgColor={colors2024['neutral-bg-5']}
+          lineColor={colors2024['neutral-title-1']}
+        />
+      )}
+    </Pressable>
+  );
+}
+
+export const AccountSwitcher = memo(AccountSwitcherComponent);
+
+const getStyle = createGetStyles2024(ctx => {
+  return {
+    container: {
+      borderRadius: 8,
+      paddingHorizontal: 8,
+      paddingVertical: 6,
+      backgroundColor: ctx.colors2024['neutral-bg-5'],
+      borderWidth: 1,
+      borderColor: ctx.colors2024['neutral-line'],
+      flexDirection: 'row',
+      alignItems: 'center',
+      alignSelf: 'flex-start',
+      marginBottom: 12,
+      maxWidth: '100%',
+    },
+    addressItem: {
+      flexShrink: 1,
+    },
+    addressRow: {
+      flexDirection: 'row',
+      // width: '100%',
+      alignItems: 'center',
+    },
+    walletIcon: {
+      borderRadius: 5,
+      width: 18,
+      height: 18,
+      marginRight: 8,
+    },
+    address: {
+      fontFamily: 'SF Pro Rounded',
+      fontWeight: '500',
+      lineHeight: 20,
+      fontSize: 16,
+      color: ctx.colors2024['neutral-body'],
+      flexShrink: 1,
+    },
+    addressCaretIcon: {
+      marginLeft: 2,
+      width: 18,
+      height: 18,
+      flexShrink: 0,
+    },
+  };
+});

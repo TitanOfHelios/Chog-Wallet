@@ -1,0 +1,120 @@
+import Svg, { SvgProps, Rect, Path } from 'react-native-svg';
+export { default as RcLogoutCC } from './logout-cc.svg';
+export { default as RcTradPerps } from './trade-perps.svg';
+export { default as RcWarningFull } from './waring-full.svg';
+export { default as RcArrowRightCC } from './arrow-right-cc.svg';
+
+export const RcIconLong = (
+  props: SvgProps & {
+    bgColor?: string;
+  },
+) => (
+  <Svg
+    // xmlns="http://www.w3.org/2000/svg"
+    width={20}
+    height={20}
+    fill="none"
+    {...props}>
+    <Rect width={20} height={20} fill={props.bgColor} rx={10} />
+
+    <Path
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth={1.875}
+      d="M13.809 12.97V6.192h-6.78M13.808 6.192 6.25 13.75"
+    />
+  </Svg>
+);
+
+export const RcIconShort = (
+  props: SvgProps & {
+    bgColor?: string;
+  },
+) => (
+  <Svg
+    // xmlns="http://www.w3.org/2000/svg"
+    width={20}
+    height={20}
+    fill="none"
+    {...props}>
+    <Rect width={20} height={20} fill={props.bgColor} rx={10} />
+    <Path
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth={1.875}
+      d="M13.809 7.03v6.779h-6.78M13.808 13.808 6.25 6.25"
+    />
+  </Svg>
+);
+
+export const RcIconDepositCC = (
+  props: SvgProps & {
+    bgColor?: string;
+  },
+) => (
+  <Svg
+    // xmlns="http://www.w3.org/2000/svg"
+    width={46}
+    height={46}
+    fill="none"
+    {...props}>
+    <Path
+      fill={props.bgColor}
+      fillOpacity={0.5}
+      d="M23 0C10.29 0 0 10.29 0 23s10.29 23 23 23 23-10.29 23-23S35.71 0 23 0Z"
+    />
+    <Path
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth={3}
+      d="M23 32V15M28 27l-5 5-5-5"
+    />
+  </Svg>
+);
+
+export const RcIconWithdrawCC = (
+  props: SvgProps & {
+    bgColor?: string;
+  },
+) => (
+  <Svg
+    // xmlns="http://www.w3.org/2000/svg"
+    width={46}
+    height={46}
+    fill="none"
+    {...props}>
+    <Path
+      fill={props.bgColor}
+      fillOpacity={0.5}
+      d="M23 46C10.29 46 0 35.71 0 23S10.29 0 23 0s23 10.29 23 23-10.29 23-23 23Z"
+    />
+    <Path
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth={3}
+      d="M23 14v17M28 19l-5-5-5 5"
+    />
+  </Svg>
+);
+
+export const RcIconTransferCC = (
+  props: SvgProps & {
+    bgColor?: string;
+  },
+) => (
+  <Svg width={46} height={46} viewBox="0 0 46 46" fill="none" {...props}>
+    <Path
+      fill={props.bgColor}
+      fillOpacity={0.5}
+      d="M23 0C10.2895 0 0 10.2895 0 23C0 35.7105 10.2895 46 23 46C35.7105 46 46 35.7105 46 23C46 10.2895 35.7105 0 23 0Z"
+    />
+    <Path
+      fill="currentColor"
+      d="M17.2153 30.5897C16.4342 31.3707 15.1679 31.3707 14.3868 30.5897L11.8403 28.0432C11.3739 27.5767 11.3672 26.8225 11.8254 26.3479C12.2952 25.8615 13.0725 25.8546 13.5507 26.3328L14.6008 27.3829V18.801C14.6008 17.4808 15.0709 16.3505 16.0111 15.4103C16.9513 14.4701 18.0815 14 19.4018 14C20.7221 14 21.8524 14.4701 22.7926 15.4103C23.7328 16.3505 24.2029 17.4808 24.2029 18.801V27.2029C24.2029 27.863 24.4379 28.4281 24.908 28.8982C25.3781 29.3683 25.9432 29.6034 26.6034 29.6034C27.2635 29.6034 27.8287 29.3683 28.2988 28.8982C28.7689 28.4281 29.0039 27.863 29.0039 27.2029V18.621L27.9538 19.6711C27.4756 20.1493 26.6983 20.1425 26.2286 19.656C25.7704 19.1814 25.777 18.4272 26.2434 17.9607L28.79 15.4142C29.571 14.6332 30.8373 14.6332 31.6184 15.4142L34.1649 17.9607C34.6314 18.4272 34.638 19.1814 34.1798 19.656C33.7101 20.1425 32.9327 20.1493 32.4545 19.6711L31.4044 18.621V27.2029C31.4044 28.5232 30.9343 29.6534 29.9941 30.5936C29.0539 31.5338 27.9237 32.0039 26.6034 32.0039C25.2831 32.0039 24.1529 31.5338 23.2127 30.5936C22.2724 29.6534 21.8023 28.5232 21.8023 27.2029V18.801C21.8023 18.1409 21.5673 17.5758 21.0972 17.1057C20.6271 16.6356 20.062 16.4005 19.4018 16.4005C18.7417 16.4005 18.1766 16.6356 17.7065 17.1057C17.2364 17.5758 17.0013 18.1409 17.0013 18.801V27.3829L18.0514 26.3328C18.5296 25.8546 19.3069 25.8615 19.7766 26.3479C20.2348 26.8225 20.2282 27.5767 19.7618 28.0432L17.2153 30.5897Z"
+    />
+  </Svg>
+);

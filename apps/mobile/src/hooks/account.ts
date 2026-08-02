@@ -1,0 +1,414 @@
+import type React from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  useSyncExternalStore,
+} from 'react';
+
+import type { KeyringAccount } from '@rabby-wallet/keyring-utils';
+import { KEYRING_TYPE } from '@rabby-wallet/keyring-utils';
+
+import type {
+  Account,
+  IPinAddress,
+  KeyringAccountWithAlias,
+} from '@/types/account';
+import { getWalletIcon } from '@/utils/walletInfo';
+import { filterMyAccounts } from '@/utils/account';
+import { useCreationWithShallowCompare } from './common/useMemozied';
+import { accountEvents } from '@/core/apis/account';
+import * as apiMnemonic from '@/core/apis/mnemonic';
+import type { UpdaterOrPartials } from '@/core/utils/store';
+import { resolveValFromUpdater } from '@/core/utils/store';
+import addressBalanceStore from '@/store/balance';
+import accountStore, {
+  NEWLY_ADDED_ACCOUNT_DURATION,
+  useAccountStore,
+} from '@/store/account';
+import { isSameAddress } from '@rabby-wallet/base-utils/dist/isomorphic/address';
+import {
+  clearNeedsBackupReminder,
+  getNeedsBackupReminderSnapshot,
+  setNeedsBackupReminder,
+} from '@/core/serviceApi/preference';
+import { EntityAccountBase } from '@/databases/entities/base';
+import { ormEvents } from '@/databases/entities/_helpers';
+import { InteractionManager } from 'react-native';
+import { appServiceEvents } from '@/core/events/appServiceEvents';
+import { perfEvents } from '@/core/utils/perf';
+import { AccountInfoEntity } from '@/databases/entities/accountInfo';
+
+export type { KeyringAccountWithAlias as /** @deprecated */ KeyringAccountWithAlias } from '@/types/account';
+
+export function useIsNewlyAddedAccount(account: KeyringAccount) {
+  const dbId = useMemo(() => {
+    return EntityAccountBase.buildDBId({
+      address: account.address,
+      type: account.type,
+      brandName: account.brandName,
+    });
+  }, [account.address, account.brandName, account.type]);
+  const newlyAddedAccount = useAccountStore(
+    s => s.newlyAddedAccounts[dbId] ?? null,
+  );
+
+  return {
+    newlyAddedAccount,
+    isNewlyAdded:
+      !!newlyAddedAccount &&
+      Date.now() - newlyAddedAccount.updated_at <= NEWLY_ADDED_ACCOUNT_DURATION,
+  };
+}
+
+function getBackupReminderKey(
+  account:
+    | Pick<KeyringAccount, 'hdPathBasePublicKey' | 'publicKey'>
+    | null
+    | undefined,
+) {
+  return account?.hdPathBasePublicKey ?? account?.publicKey ?? null;
+}
+
+/**
+ * Gets the base public key for an HD keyring account (seed phrase identifier).
+ * All addresses from the same seed phrase share the same basePublicKey.
+ * Returns null for non-HD accounts.
+ */
+async function getBasePublicKeyForAccount(
+  account: KeyringAccount | null | undefined,
+): Promise<string | null> {
+  if (!account?.address) return null;
+  // Only HD keyring accounts have seed phrases that need backup
+  if (account.type !== KEYRING_TYPE.HdKeyring) return null;
+  const publicKey = getBackupReminderKey(account);
+  if (publicKey) {
+    return publicKey;
+  }
+
+  try {
+    const info = await apiMnemonic.getMnemonicAddressInfo(account.address);
+    return info?.basePublicKey ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Gets the current backup reminder snapshot for a seed phrase.
+ * @param basePublicKey - The keyring's base public key (unique per seed phrase)
+ * @returns Whether the seed phrase needs backup reminder
+ */
+function getBackupReminderSnapshot(basePublicKey: string | null): boolean {
+  if (!basePublicKey) return false;
+  return getNeedsBackupReminderSnapshot(basePublicKey);
+}
+
+/**
+ * Subscribe function for backup reminder changes.
+ * Subscribes to all backup reminder changes (not specific to an account).
+ * @param listener - The callback to call when any backup reminder changes
+ * @returns An unsubscribe function
+ */
+const subscribeBackupReminderStore = (listener: () => void) => {
+  // Subscribe to all backup reminder changes
+  const { remove } = appServiceEvents.subscribe(
+    'backupReminderChanged',
+    listener,
+  );
+  return remove;
+};
+
+/**
+ * Hook for checking if current account needs backup reminder.
+ * Returns true only for accounts from a seed phrase that hasn't been backed up yet.
+ * Uses basePublicKey to track backup at the seed phrase level, not address level.
+ * This means if one address from a seed phrase is backed up, all addresses from
+ * that same seed phrase are considered backed up.
+ */
+export function useBackupReminder(account: KeyringAccount | null | undefined) {
+  const [basePublicKey, setBasePublicKey] = useState<string | null>(null);
+
+  const address = account?.address;
+  const type = account?.type;
+  const brandName = account?.brandName;
+  const hdPathBasePublicKey = account?.hdPathBasePublicKey;
+  const publicKey = account?.publicKey;
+  const storedPublicKey = useAccountStore(s => {
+    if (!address || type !== KEYRING_TYPE.HdKeyring) {
+      return null;
+    }
+
+    const storedAccount = s.accounts.find(
+      item =>
+        isSameAddress(item.address, address) &&
+        item.type === type &&
+        (!brandName || item.brandName === brandName),
+    );
+    return getBackupReminderKey(storedAccount);
+  });
+
+  useEffect(() => {
+    let cancelled = false;
+
+    if (!address || type !== KEYRING_TYPE.HdKeyring) {
+      setBasePublicKey(null);
+      return;
+    }
+
+    const basePublicKey = hdPathBasePublicKey || publicKey || storedPublicKey;
+    if (basePublicKey) {
+      setBasePublicKey(basePublicKey);
+      return;
+    }
+
+    getBasePublicKeyForAccount({
+      address,
+      type: KEYRING_TYPE.HdKeyring,
+      brandName: brandName ?? '',
+    }).then(nextBasePublicKey => {
+      if (!cancelled) {
+        setBasePublicKey(nextBasePublicKey);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    address,
+    type,
+    brandName,
+    hdPathBasePublicKey,
+    publicKey,
+    storedPublicKey,
+  ]);
+
+  const getSnapshot = useCallback(
+    () => getBackupReminderSnapshot(basePublicKey),
+    [basePublicKey],
+  );
+
+  const needsBackupReminder = useSyncExternalStore(
+    subscribeBackupReminderStore,
+    getSnapshot,
+  );
+
+  return needsBackupReminder;
+}
+
+/**
+ * Sets backup reminder for an account's seed phrase.
+ * The reminder is tracked by basePublicKey, so all addresses from the same
+ * seed phrase will share the same backup reminder state.
+ */
+export async function setAccountNeedsBackupReminder(
+  account: KeyringAccount,
+  needsReminder: boolean,
+) {
+  const basePublicKey = await getBasePublicKeyForAccount(account);
+  if (!basePublicKey) return;
+  await setNeedsBackupReminder(basePublicKey, needsReminder);
+}
+
+/**
+ * Clears backup reminder for an account's seed phrase.
+ * This clears the reminder for all addresses from the same seed phrase.
+ */
+export async function clearAccountBackupReminder(account: KeyringAccount) {
+  const basePublicKey = await getBasePublicKeyForAccount(account);
+  if (!basePublicKey) return;
+  await clearNeedsBackupReminder(basePublicKey);
+}
+
+export function useDevNewlyAddedAccounts() {
+  const newlyAddedAccounts = useAccountStore(s => s.newlyAddedAccounts);
+  return {
+    newlyAddedAccounts: useMemo(
+      () => Object.values(newlyAddedAccounts),
+      [newlyAddedAccounts],
+    ),
+  };
+}
+
+export function startManageAccountStoreLifecycle() {
+  accountStore.startLifecycle();
+}
+
+export function setCurrentAccount(
+  valOrFunc: UpdaterOrPartials<KeyringAccountWithAlias | null>,
+) {
+  accountStore.setCurrentAccount(valOrFunc);
+}
+
+export function useAccounts(opts?: { disableAutoFetch?: boolean }) {
+  const accounts = useAccountStore(s => s.accounts);
+
+  const { disableAutoFetch = false } = opts || {};
+
+  useEffect(() => {
+    if (!disableAutoFetch) {
+      accountStore.fetchAccounts();
+    }
+  }, [disableAutoFetch]);
+
+  const stableAccounts = useCreationWithShallowCompare(() => {
+    return accounts;
+  }, [accounts]);
+
+  return {
+    accounts: stableAccounts,
+    fetchAccounts: accountStore.fetchAccounts,
+  };
+}
+
+export const storeApiAccounts = {
+  getAccounts() {
+    return accountStore.getState().accounts;
+  },
+  getPinAddresses() {
+    return accountStore.getState().pinnedAddresses;
+  },
+  fetchAccounts: accountStore.fetchAccounts,
+  removeAccount: accountStore.removeAccount,
+};
+
+export function useMyAccounts(opts?: { disableAutoFetch?: boolean }) {
+  const allAccounts = useAccountStore(s => s.accounts);
+
+  const { disableAutoFetch = false } = opts || {};
+
+  useEffect(() => {
+    if (!disableAutoFetch) {
+      accountStore.fetchAccounts();
+    }
+  }, [disableAutoFetch]);
+
+  const accounts = useCreationWithShallowCompare(() => {
+    return filterMyAccounts(allAccounts);
+  }, [allAccounts]);
+
+  return {
+    accounts,
+    fetchAccounts: accountStore.fetchAccounts,
+  };
+}
+
+export const usePinAddresses = (opts?: { disableAutoFetch?: boolean }) => {
+  const { disableAutoFetch = false } = opts || {};
+  const pinAddresses = useAccountStore(s => s.pinnedAddresses);
+
+  const getPinAddressesAsync = useCallback(
+    () => accountStore.refreshPinnedAddresses(),
+    [],
+  );
+
+  useEffect(() => {
+    if (!disableAutoFetch) {
+      getPinAddressesAsync();
+    }
+  }, [disableAutoFetch, getPinAddressesAsync]);
+
+  return {
+    pinAddresses,
+    getPinAddressesAsync,
+    togglePinAddressAsync: accountStore.togglePinAddressAsync,
+  };
+};
+
+export const usePinnedAccountList = () => {
+  const pinAddresses = useAccountStore(s => s.pinnedAddresses);
+  const accounts = useAccountStore(s => s.accounts);
+
+  useEffect(() => {
+    accountStore.ensurePinnedAddressesHydrated().catch(error => {
+      if (__DEV__) {
+        console.error('[usePinnedAccountList] hydrate failed', error);
+      }
+    });
+  }, []);
+
+  const pinnedBaseAccounts = useMemo(() => {
+    const res: KeyringAccountWithAlias[] = [];
+    pinAddresses?.forEach(pinAddr => {
+      const item = accounts.find(account => {
+        return (
+          isSameAddress(pinAddr.address, account.address) &&
+          account.brandName === pinAddr.brandName
+        );
+      });
+      if (
+        item &&
+        ![
+          KEYRING_TYPE.GnosisKeyring,
+          KEYRING_TYPE.WatchAddressKeyring,
+          KEYRING_TYPE.WalletConnectKeyring,
+        ].includes(item.type)
+      ) {
+        res.push(item);
+      }
+    });
+
+    return res;
+  }, [accounts, pinAddresses]);
+  const pinnedAddresses = useMemo(() => {
+    return pinnedBaseAccounts.map(item => item.address.toLowerCase());
+  }, [pinnedBaseAccounts]);
+  const balanceSnapshots =
+    addressBalanceStore.useAddressesSnapshot(pinnedAddresses);
+
+  const pinnedAccountList = useMemo(() => {
+    const balanceMap = balanceSnapshots.reduce(
+      (acc, snapshot) => {
+        if (snapshot.value) {
+          acc[snapshot.address] = snapshot.value;
+        }
+        return acc;
+      },
+      {} as Record<
+        string,
+        {
+          totalBalance: number;
+          evmBalance: number;
+        }
+      >,
+    );
+
+    return pinnedBaseAccounts.map(item => {
+      const balance = balanceMap[item.address.toLowerCase()];
+
+      return {
+        ...item,
+        balance: balance?.totalBalance || item.balance || 0,
+        evmBalance: balance?.evmBalance || item.evmBalance || 0,
+      };
+    });
+  }, [balanceSnapshots, pinnedBaseAccounts]);
+
+  return pinnedAccountList;
+};
+
+/**
+ * @deprecated use `storeApiAccounts.removeAccount` directly
+ */
+export function useRemoveAccount() {
+  return useCallback(async (account: KeyringAccount) => {
+    await accountStore.removeAccount(account as KeyringAccountWithAlias);
+  }, []);
+}
+
+export function useWalletBrandLogo<T extends string>(brandName?: T) {
+  const RcWalletIcon = useMemo(() => {
+    return getWalletIcon(brandName);
+  }, [brandName]) as T extends void
+    ? null
+    : React.FC<import('react-native-svg').SvgProps>;
+
+  return {
+    RcWalletIcon,
+  };
+}
+
+export { NEWLY_ADDED_ACCOUNT_DURATION };
+export type { Account, IPinAddress };

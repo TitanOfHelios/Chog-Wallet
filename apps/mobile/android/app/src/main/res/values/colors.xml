@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <color name="text">#000000</color>
+  <color name="background">#FDF7D3</color>
+  <color name="primary">#D53F7E</color>
+  <color name="primary_dark">#D53F7E</color>
+  <color name="launchscreen_bg">#FDF7D3</color>
+  <color name="status_bar_color">#FDF7D3</color>
+</resources>

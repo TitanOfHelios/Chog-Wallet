@@ -1,0 +1,1025 @@
+import {
+  calcMaxPriorityFee,
+  checkGasAndNonce,
+  is7702Tx,
+} from '@/utils/transaction';
+
+import type {
+  ExplainTxResponse,
+  GasLevel,
+  ParseTxResponse,
+  Tx,
+  TxPushType,
+} from '@rabby-wallet/rabby-api/dist/types';
+import { findChain, isTestnet } from './chain';
+import { keyringServiceApi } from '@/core/serviceApi/keyring';
+import { transactionHistoryServiceApi } from '@/core/serviceApi/transactionHistory';
+import { whitelistServiceApi } from '@/core/serviceApi/whitelist';
+import { miscServiceApi } from '@/core/serviceApi/misc';
+import { notificationServiceApi } from '@/core/serviceApi/notification';
+import { apiKeyring, apiProvider } from '@/core/apis';
+import { openapi, testOpenapi } from '@/core/request';
+import { INTERNAL_REQUEST_ORIGIN, INTERNAL_REQUEST_SESSION } from '@/constant';
+import { intToHex } from './number';
+
+import BigNumber from 'bignumber.js';
+import {
+  explainGas,
+  getGasTokenBalance,
+  getRecommendGas,
+} from '@/components/Approval/components/SignTx/calc';
+import { CHAINS_ENUM } from '@/constant/chains';
+import { eventBus, EVENTS } from './events';
+import {
+  fetchActionRequiredData,
+  parseAction,
+} from '@rabby-wallet/rabby-action';
+import { ALIAS_ADDRESS } from '@/constant/gas';
+import { calcGasLimit } from '@/core/apis/transactions';
+import { stats } from './stats';
+import {
+  KEYRING_CATEGORY_MAP,
+  KEYRING_TYPE,
+} from '@rabby-wallet/keyring-utils';
+import { apisTransactionHistory } from '@/core/apis/transactionHistory';
+import { getCexInfo } from '@/hooks/useCexSupportList';
+import { isNonPublicProductionEnv } from '@/constant';
+import { getDefaultStore } from 'jotai';
+import { mockBatchRevokeStore } from '@/hooks/appSettings';
+import type { Account } from '@/types/account';
+import type { TxWithTempoExtras } from './tempo';
+import {
+  buildTempoTransaction,
+  isTempoBatchSupportedAccountType,
+  isTempoChain,
+  shouldUseTempoTransaction,
+  toTempoCallsTx,
+} from './tempo';
+
+// fail code
+export enum FailedCode {
+  GasNotEnough = 'GasNotEnough',
+  GasTooHigh = 'GasTooHigh',
+  SubmitTxFailed = 'SubmitTxFailed',
+  DefaultFailed = 'DefaultFailed',
+  SimulationFailed = 'SimulationFailed',
+  UserRejected = 'UserRejected',
+}
+
+type ProgressStatus = 'building' | 'builded' | 'signed' | 'submitted';
+
+const checkEnoughUseGasAccount = async ({
+  gasAccount,
+  transaction,
+  currentAccountType,
+}: {
+  transaction: TxWithTempoExtras<Tx>;
+  currentAccountType: string;
+  gasAccount?: {
+    sig: string | undefined;
+    accountId: string | undefined;
+  };
+}) => {
+  let gasAccountCanPay: boolean = false;
+
+  // native gas not enough check gasAccount
+  let gasAccountVerfiyPass = true;
+  let gasAccountCost;
+  try {
+    gasAccountCost = await openapi.checkGasAccountTxs({
+      sig: gasAccount?.sig || '',
+      account_id: gasAccount?.accountId || '',
+      tx_list: [transaction],
+    });
+  } catch (e) {
+    gasAccountVerfiyPass = false;
+  }
+  gasAccountCanPay =
+    gasAccountVerfiyPass &&
+    currentAccountType !== KEYRING_TYPE.WalletConnectKeyring &&
+    currentAccountType !== KEYRING_TYPE.WatchAddressKeyring &&
+    !!gasAccountCost?.balance_is_enough &&
+    !gasAccountCost.chain_not_support &&
+    !!gasAccountCost.is_gas_account;
+
+  return gasAccountCanPay;
+};
+
+/**
+ * send transaction without rpcFlow
+ * @param tx
+ * @param chainServerId
+ * @param wallet
+ * @param ignoreGasCheck if ignore gas check
+ * @param onProgress callback
+ * @param gasLevel gas level, default is normal
+ * @param lowGasDeadline low gas deadline
+ * @param isGasLess is gas less
+ * @param isGasAccount is gas account
+ * @param gasAccount gas account { sig, account }
+ * @param autoUseGasAccount when gas balance is low , auto use gas account for gasfee
+ * @param onUseGasAccount use gas account callback
+ */
+export const sendTransaction = async ({
+  tx,
+  chainServerId,
+  ignoreGasCheck,
+  onProgress,
+  gasLevel,
+  lowGasDeadline,
+  isGasLess,
+  isGasAccount,
+  gasAccount,
+  autoUseGasAccount,
+  waitCompleted = true,
+  pushType = 'default',
+  ignoreGasNotEnoughCheck,
+  onUseGasAccount,
+  ga,
+  sig,
+  extra,
+  ignoreSimulationFailed,
+  account,
+}: {
+  tx: Tx;
+  chainServerId: string;
+  ignoreGasCheck?: boolean;
+  ignoreGasNotEnoughCheck?: boolean;
+  ignoreSimulationFailed?: boolean;
+  onProgress?: (status: ProgressStatus) => void;
+  onUseGasAccount?: () => void;
+  extra?: {
+    preExecResult?: ExplainTxResponse;
+    actionData?: ParseTxResponse;
+  };
+  gasLevel?: GasLevel;
+  lowGasDeadline?: number;
+  isGasLess?: boolean;
+  isGasAccount?: boolean;
+  gasAccount?: {
+    sig: string | undefined;
+    accountId: string | undefined;
+  };
+  autoUseGasAccount?: boolean;
+  waitCompleted?: boolean;
+  pushType?: TxPushType;
+  ga?: Record<string, any>;
+  sig?: string;
+  account: Account;
+}) => {
+  const MOCK_BATCH_REVOKE = mockBatchRevokeStore.getState();
+  console.log('MOCK_BATCH_REVOKE', MOCK_BATCH_REVOKE);
+
+  onProgress?.('building');
+  const chain = findChain({
+    serverId: chainServerId,
+  })!;
+  const support1559 = chain.eip['1559'];
+  const { address, ...currentAccount } = account;
+  const shouldUseTempoCallsForGasAccount = (gasAccountEnabled?: boolean) =>
+    !!gasAccountEnabled &&
+    isTempoChain(chainServerId) &&
+    isTempoBatchSupportedAccountType(currentAccount.type);
+
+  const recommendNonce =
+    tx.nonce ||
+    (await apiProvider.getRecommendNonce({
+      from: tx.from,
+      chainId: chain.id,
+      account,
+      nonceKey: (tx as TxWithTempoExtras<Tx>).nonceKey as
+        | string
+        | number
+        | bigint
+        | undefined,
+    }));
+
+  // get gas
+  let normalGas = gasLevel;
+  if (!normalGas) {
+    const gasMarket = await apiProvider.gasMarketV2(
+      {
+        chain,
+        tx,
+      },
+      account,
+    );
+    normalGas = gasMarket.find(item => item.level === 'normal')!;
+  }
+
+  const signingTxId = await transactionHistoryServiceApi.addSigningTx(tx);
+
+  const reportGasLevel =
+    normalGas.level || miscServiceApi.getCurrentGasLevel() || 'normal';
+
+  stats.report('createTransaction', {
+    type: currentAccount.brandName,
+    category: KEYRING_CATEGORY_MAP[currentAccount.type],
+    chainId: chain.serverId,
+    createdBy: ga ? 'rabby' : 'dapp',
+    source: ga?.source || '',
+    trigger: ga?.trigger || '',
+    networkType: chain?.isTestnet ? 'Custom Network' : 'Integrated Network',
+    swapUseSlider: ga?.swapUseSlider ?? '',
+    gasLevel: reportGasLevel,
+  });
+
+  // pre exec tx
+  const preExecResult =
+    extra?.preExecResult ||
+    (await openapi.preExecTx({
+      tx: shouldUseTempoCallsForGasAccount(isGasAccount)
+        ? (toTempoCallsTx(
+            {
+              ...tx,
+              nonce: recommendNonce,
+              data: tx.data,
+              value: tx.value || '0x0',
+              gasPrice: intToHex(Math.round(normalGas.price)),
+            },
+            { stripTopLevelData: true },
+          ) as any)
+        : ({
+            ...tx,
+            nonce: recommendNonce,
+            data: tx.data,
+            value: tx.value || '0x0',
+            gasPrice: intToHex(Math.round(normalGas.price)),
+          } as any),
+      origin: INTERNAL_REQUEST_ORIGIN,
+      address: address,
+      updateNonce: true,
+      pending_tx_list: await apisTransactionHistory.getPendingTxs({
+        recommendNonce,
+        address,
+        chainId: tx.chainId,
+      }),
+    }));
+
+  const gasToken = await getGasTokenBalance({
+    chainId: chain.id,
+    address,
+    account,
+  });
+  const balance = gasToken.rawBalance;
+  const checkTxValueInBalance = !isTempoChain(chain.serverId);
+  let estimateGas = 0;
+  if (preExecResult.gas.success) {
+    estimateGas = preExecResult.gas.gas_limit || preExecResult.gas.gas_used;
+  }
+  const {
+    gas: gasRaw,
+    needRatio,
+    gasUsed,
+  } = await getRecommendGas({
+    gasUsed: preExecResult.gas.gas_used,
+    gas: estimateGas,
+    tx,
+    chainId: chain.id,
+  });
+  const gas = new BigNumber(gasRaw);
+  let gasLimit = tx.gas || tx.gasLimit;
+  let recommendGasLimitRatio = 1;
+
+  if (!gasLimit) {
+    const {
+      gasLimit: _gasLimit,
+      recommendGasLimitRatio: _recommendGasLimitRatio,
+    } = await calcGasLimit({
+      chain,
+      tx,
+      gas,
+      selectedGas: normalGas,
+      nativeTokenBalance: balance,
+      explainTx: preExecResult,
+      needRatio,
+      account,
+      gasTokenDecimals: gasToken.token.decimals,
+      checkTxValueInBalance,
+    });
+    gasLimit = _gasLimit;
+    recommendGasLimitRatio = _recommendGasLimitRatio;
+  }
+
+  // calc gasCost
+  const gasCost = await explainGas({
+    gasUsed,
+    gasPrice: normalGas.price,
+    chainId: chain.id,
+    nativeTokenPrice: preExecResult.native_token.price,
+    tx,
+    gasLimit,
+    account,
+    gasTokenDecimals: gasToken.token.decimals,
+  });
+
+  // check gas errors
+  const checkErrors = ignoreGasNotEnoughCheck
+    ? []
+    : checkGasAndNonce({
+        recommendGasLimit: `0x${gas.toString(16)}`,
+        recommendNonce,
+        gasLimit: Number(gasLimit),
+        nonce: Number(recommendNonce || tx.nonce),
+        gasExplainResponse: gasCost,
+        isSpeedUp: false,
+        isCancel: false,
+        tx,
+        isGnosisAccount: false,
+        nativeTokenBalance: balance,
+        recommendGasLimitRatio,
+        gasTokenDecimals: gasToken.token.decimals,
+        checkTxValueInBalance,
+      });
+
+  const isGasNotEnough = !isGasLess && checkErrors.some(e => e.code === 3001);
+  const ETH_GAS_USD_LIMIT = isNonPublicProductionEnv
+    ? MOCK_BATCH_REVOKE.DEBUG_ETH_GAS_USD_LIMIT
+    : 20;
+  const OTHER_CHAIN_GAS_USD_LIMIT = isNonPublicProductionEnv
+    ? MOCK_BATCH_REVOKE.DEBUG_OTHER_CHAIN_GAS_USD_LIMIT
+    : 5;
+  const DEBUG_SIMULATION_FAILED = isNonPublicProductionEnv
+    ? MOCK_BATCH_REVOKE.DEBUG_SIMULATION_FAILED
+    : false;
+
+  // generate tx with gas
+  const transaction: TxWithTempoExtras<Tx> = {
+    from: tx.from,
+    to: tx.to,
+    data: tx.data,
+    nonce: recommendNonce,
+    value: tx.value,
+    chainId: tx.chainId,
+    gas: gasLimit,
+    type: (tx as TxWithTempoExtras<Tx>).type,
+    calls: (tx as TxWithTempoExtras<Tx>).calls,
+    feeToken: (tx as TxWithTempoExtras<Tx>).feeToken,
+    feePayer: (tx as TxWithTempoExtras<Tx>).feePayer,
+    feePayerSignature: (tx as TxWithTempoExtras<Tx>).feePayerSignature,
+    nonceKey: (tx as TxWithTempoExtras<Tx>).nonceKey,
+    keyAuthorization: (tx as TxWithTempoExtras<Tx>).keyAuthorization,
+    validBefore: (tx as TxWithTempoExtras<Tx>).validBefore,
+    validAfter: (tx as TxWithTempoExtras<Tx>).validAfter,
+  };
+
+  let failedCode;
+  let canUseGasAccount: boolean = false;
+  // random simulation failed for test
+  if (
+    !ignoreSimulationFailed &&
+    DEBUG_SIMULATION_FAILED &&
+    Math.random() > 0.5
+  ) {
+    failedCode = FailedCode.SimulationFailed;
+  } else if (
+    !ignoreSimulationFailed &&
+    !preExecResult?.balance_change?.success
+  ) {
+    failedCode = FailedCode.SimulationFailed;
+  } else if (isGasNotEnough) {
+    //  native gas not enough check gasAccount
+    if (autoUseGasAccount && gasAccount?.sig && gasAccount?.accountId) {
+      const gasAccountCanPay = await checkEnoughUseGasAccount({
+        gasAccount,
+        currentAccountType: currentAccount.type,
+        transaction: shouldUseTempoCallsForGasAccount(true)
+          ? (toTempoCallsTx(
+              {
+                ...transaction,
+                gas: gasLimit,
+                gasPrice: intToHex(normalGas.price),
+              },
+              { stripTopLevelData: true },
+            ) as any)
+          : {
+              ...transaction,
+              gas: gasLimit,
+              gasPrice: intToHex(normalGas.price),
+            },
+      });
+      if (gasAccountCanPay) {
+        onUseGasAccount?.();
+        canUseGasAccount = true;
+      } else {
+        failedCode = FailedCode.GasNotEnough;
+      }
+    } else {
+      failedCode = FailedCode.GasNotEnough;
+    }
+  } else if (
+    !ignoreGasCheck &&
+    // eth gas > $20
+    ((chain.enum === CHAINS_ENUM.ETH &&
+      gasCost.gasCostUsd.isGreaterThan(ETH_GAS_USD_LIMIT)) ||
+      // other chain gas > $5
+      (chain.enum !== CHAINS_ENUM.ETH &&
+        gasCost.gasCostUsd.isGreaterThan(OTHER_CHAIN_GAS_USD_LIMIT)))
+  ) {
+    failedCode = FailedCode.GasTooHigh;
+  }
+
+  if (failedCode) {
+    throw {
+      name: failedCode,
+      gasCost,
+    };
+  }
+
+  const maxPriorityFee =
+    +(tx.maxPriorityFeePerGas || '') ||
+    calcMaxPriorityFee([], normalGas, chain.id, true);
+  const maxFeePerGas =
+    tx.maxFeePerGas || tx.gasPrice || intToHex(Math.round(normalGas.price));
+
+  if (support1559) {
+    transaction.maxFeePerGas = maxFeePerGas;
+    transaction.maxPriorityFeePerGas =
+      maxPriorityFee < 0
+        ? tx.maxFeePerGas
+        : intToHex(Math.round(maxPriorityFee));
+  } else {
+    (transaction as Tx).gasPrice = maxFeePerGas;
+  }
+
+  const shouldUseGasAccountMode = autoUseGasAccount
+    ? canUseGasAccount
+    : isGasAccount;
+  const transactionForSubmit = shouldUseTempoCallsForGasAccount(
+    shouldUseGasAccountMode,
+  )
+    ? ({
+        ...(toTempoCallsTx(transaction as any, {
+          stripTopLevelData: true,
+        }) as any),
+        feePayer: true,
+      } as any)
+    : transaction;
+
+  // fetch action data
+  const actionData =
+    extra?.actionData ||
+    (await openapi.parseTx({
+      chainId: chain.serverId,
+      tx: shouldUseTempoCallsForGasAccount(shouldUseGasAccountMode)
+        ? (toTempoCallsTx(
+            {
+              ...tx,
+              gas: '0x0',
+              nonce: recommendNonce || '0x1',
+              value: tx.value || '0x0',
+              to: tx.to || '',
+              type: '0x76',
+            },
+            { stripTopLevelData: true },
+          ) as any)
+        : ({
+            ...tx,
+            gas: '0x0',
+            nonce: recommendNonce || '0x1',
+            value: tx.value || '0x0',
+            to: tx.to || '',
+            type: is7702Tx(tx) ? 4 : support1559 ? 2 : undefined,
+          } as any),
+      origin: INTERNAL_REQUEST_SESSION.origin || '',
+      addr: address,
+    }));
+  const parsed = parseAction({
+    type: 'transaction',
+    data: actionData.action,
+    balanceChange: preExecResult.balance_change,
+    tx: shouldUseTempoCallsForGasAccount(shouldUseGasAccountMode)
+      ? (toTempoCallsTx(
+          {
+            ...tx,
+            gas: '0x0',
+            nonce: recommendNonce || '0x1',
+            value: tx.value || '0x0',
+            type: '0x76',
+          },
+          { stripTopLevelData: true },
+        ) as any)
+      : {
+          ...tx,
+          gas: '0x0',
+          nonce: recommendNonce || '0x1',
+          value: tx.value || '0x0',
+        },
+    preExecVersion: preExecResult.pre_exec_version,
+    gasUsed: preExecResult.gas.gas_used,
+    sender: tx.from,
+  });
+  const cexInfo = getCexInfo(parsed.send?.to || '');
+  const requiredData = await fetchActionRequiredData({
+    type: 'transaction',
+    actionData: parsed,
+    contractCall: actionData.contract_call,
+    chainId: chain.serverId,
+    sender: address,
+    cex: cexInfo,
+    walletProvider: {
+      ethRpc: apiProvider.requestETHRpc,
+      hasPrivateKeyInWallet: apiKeyring.hasPrivateKeyInWallet,
+      hasAddress: keyringServiceApi.hasAddress,
+      getWhitelist: async () => whitelistServiceApi.getWhitelist(),
+      isWhitelistEnabled: async () => whitelistServiceApi.isWhitelistEnabled(),
+      getPendingTxsByNonce: async (...args) =>
+        transactionHistoryServiceApi.getPendingTxsByNonce(...args),
+      findChain,
+      ALIAS_ADDRESS,
+    },
+    tx: {
+      ...(shouldUseTempoCallsForGasAccount(shouldUseGasAccountMode)
+        ? (toTempoCallsTx(
+            {
+              ...tx,
+              gas: '0x0',
+              nonce: recommendNonce || '0x1',
+              value: tx.value || '0x0',
+              type: '0x76',
+            },
+            { stripTopLevelData: true },
+          ) as any)
+        : {
+            ...tx,
+            gas: '0x0',
+            nonce: recommendNonce || '0x1',
+            value: tx.value || '0x0',
+          }),
+    },
+    apiProvider: openapi,
+  });
+
+  await transactionHistoryServiceApi.updateSigningTx(signingTxId, {
+    rawTx: {
+      nonce: recommendNonce,
+    },
+    explain: {
+      ...preExecResult,
+      calcSuccess: !(checkErrors.length > 0),
+    },
+    action: {
+      actionData: parsed,
+      requiredData,
+    },
+  });
+  const logId = actionData.log_id;
+  const estimateGasCost = {
+    gasCostUsd: gasCost.gasCostUsd,
+    gasCostAmount: gasCost.gasCostAmount,
+    nativeTokenSymbol: gasToken.token.symbol,
+    gasPrice: normalGas.price,
+    nativeTokenPrice: isTempoChain(chain.serverId)
+      ? 1
+      : preExecResult.native_token.price,
+  };
+
+  onProgress?.('builded');
+
+  if (isNonPublicProductionEnv) {
+    if (MOCK_BATCH_REVOKE.DEBUG_MOCK_SUBMIT) {
+      return {
+        txHash: 'mock_hash',
+        gasCost: estimateGasCost,
+      };
+    }
+  }
+
+  const handleSendAfter = async () => {
+    const statsData = await notificationServiceApi.getStatsData();
+
+    if (statsData?.signed) {
+      const sData: any = {
+        type: statsData?.type,
+        chainId: statsData?.chainId,
+        category: statsData?.category,
+        success: statsData?.signedSuccess,
+        preExecSuccess: statsData?.preExecSuccess,
+        createdBy: statsData?.createdBy,
+        source: statsData?.source,
+        trigger: statsData?.trigger,
+        networkType: chain?.isTestnet ? 'Custom Network' : 'Integrated Network',
+      };
+      if (statsData.signMethod) {
+        sData.signMethod = statsData.signMethod;
+      }
+      stats.report('signedTransaction', sData);
+    }
+    if (statsData?.submit) {
+      stats.report('submitTransaction', {
+        type: statsData?.type,
+        chainId: statsData?.chainId,
+        category: statsData?.category,
+        success: statsData?.submitSuccess,
+        preExecSuccess: statsData?.preExecSuccess,
+        createdBy: statsData?.createdBy,
+        source: statsData?.source,
+        trigger: statsData?.trigger,
+        networkType: statsData?.networkType || '',
+      });
+    }
+  };
+
+  stats.report('signTransaction', {
+    type: currentAccount.brandName,
+    category: KEYRING_CATEGORY_MAP[currentAccount.type],
+    chainId: chain.serverId,
+    createdBy: ga ? 'rabby' : 'dapp',
+    source: ga?.source || '',
+    trigger: ga?.trigger || '',
+    networkType: chain?.isTestnet ? 'Custom Network' : 'Integrated Network',
+  });
+
+  // submit tx
+  let hash = '';
+  try {
+    hash = await apiProvider.ethSendTransaction({
+      data: {
+        $ctx: {
+          ga,
+        },
+        params: [transactionForSubmit],
+      },
+      session: INTERNAL_REQUEST_SESSION,
+      approvalRes: {
+        ...transactionForSubmit,
+        signingTxId,
+        logId,
+        lowGasDeadline,
+        isGasLess,
+        isGasAccount: shouldUseGasAccountMode,
+        pushType,
+        sig,
+      },
+      pushed: false,
+      result: undefined,
+      account,
+    });
+    await handleSendAfter();
+  } catch (e) {
+    await handleSendAfter();
+    const err = new Error((e as any).message);
+    err.name = FailedCode.SubmitTxFailed;
+    eventBus.emit(EVENTS.COMMON_HARDWARE.REJECTED, err.message);
+    throw err;
+  }
+
+  onProgress?.('signed');
+
+  if (waitCompleted) {
+    // wait tx completed
+    const txCompleted = await new Promise<{ gasUsed: number }>(resolve => {
+      const handler = res => {
+        if (res?.hash === hash) {
+          eventBus.removeListener(EVENTS.TX_COMPLETED, handler);
+          resolve(res || {});
+        }
+      };
+      eventBus.addListener(EVENTS.TX_COMPLETED, handler);
+    });
+
+    // calc gas cost
+    const gasCostAmount = new BigNumber(txCompleted.gasUsed)
+      .times(estimateGasCost.gasPrice)
+      .div(new BigNumber(10).pow(gasToken.token.decimals || 18));
+    const gasCostUsd = new BigNumber(gasCostAmount).times(
+      estimateGasCost.nativeTokenPrice,
+    );
+
+    return {
+      txHash: hash,
+      gasCost: {
+        ...estimateGasCost,
+        gasCostUsd,
+        gasCostAmount,
+      },
+    };
+  } else {
+    return {
+      txHash: hash,
+      gasCost: {
+        ...estimateGasCost,
+      },
+    };
+  }
+};
+
+export const sendTransactionByMiniSignV2 = async ({
+  tx,
+  chainServerId,
+  onProgress,
+  lowGasDeadline,
+  isGasLess,
+  isGasAccount,
+  pushType = 'default',
+  ga,
+  sig,
+  session,
+  account: _account,
+  preExecResult,
+  onSigningTxCreated,
+}: {
+  tx: Tx;
+  chainServerId: string;
+  onProgress?: (status: ProgressStatus) => void;
+  lowGasDeadline?: number;
+  isGasLess?: boolean;
+  isGasAccount?: boolean;
+  pushType?: TxPushType;
+  ga?: Record<string, any>;
+  sig?: string;
+  session?: Parameters<typeof apiProvider.ethSendTransaction>[0]['session'];
+  account: Account;
+  preExecResult: ExplainTxResponse;
+  onSigningTxCreated?: (signingTxId: string) => void;
+}) => {
+  const buildTempoTx = (
+    rawTx: Tx & Record<string, unknown>,
+    opts?: { stripTopLevelData?: boolean; feePayer?: boolean },
+  ) =>
+    buildTempoTransaction(rawTx as any, {
+      stripTopLevelData: opts?.stripTopLevelData ?? true,
+      feePayer: opts?.feePayer,
+    });
+  onProgress?.('building');
+
+  const chain = findChain({
+    serverId: chainServerId,
+  })!;
+  const support1559 = chain.eip['1559'];
+
+  const currentAccount = _account;
+  const shouldUseTempoCallsForGasAccount =
+    !!isGasAccount &&
+    isTempoChain(chainServerId) &&
+    isTempoBatchSupportedAccountType(currentAccount.type);
+  const shouldUseTempoTx = shouldUseTempoTransaction({
+    tx: tx as Tx & Record<string, unknown>,
+    chainServerId,
+    isGasAccount: shouldUseTempoCallsForGasAccount,
+    accountType: currentAccount.type,
+  });
+
+  const signingTxId = await transactionHistoryServiceApi.addSigningTx(tx);
+  onSigningTxCreated?.(signingTxId);
+
+  const reportGasLevel = miscServiceApi.getCurrentGasLevel() || 'normal';
+
+  stats.report('createTransaction', {
+    type: currentAccount.brandName,
+    category: KEYRING_CATEGORY_MAP[currentAccount.type],
+    chainId: chain.serverId,
+    createdBy: ga ? 'rabby' : 'dapp',
+    source: ga?.source || '',
+    trigger: ga?.trigger || '',
+    networkType: chain?.isTestnet ? 'Custom Network' : 'Integrated Network',
+    swapUseSlider: ga?.swapUseSlider ?? '',
+    gasLevel: reportGasLevel,
+  });
+
+  const transaction: TxWithTempoExtras<Tx> = {
+    from: tx.from,
+    to: tx.to,
+    data: tx.data,
+    nonce: tx.nonce,
+    value: tx.value,
+    chainId: tx.chainId,
+    gas: tx.gas,
+    type: (tx as TxWithTempoExtras<Tx>).type,
+    calls: (tx as TxWithTempoExtras<Tx>).calls,
+    feeToken: (tx as TxWithTempoExtras<Tx>).feeToken,
+    feePayer: (tx as TxWithTempoExtras<Tx>).feePayer,
+    feePayerSignature: (tx as TxWithTempoExtras<Tx>).feePayerSignature,
+    nonceKey: (tx as TxWithTempoExtras<Tx>).nonceKey,
+    keyAuthorization: (tx as TxWithTempoExtras<Tx>).keyAuthorization,
+    validBefore: (tx as TxWithTempoExtras<Tx>).validBefore,
+    validAfter: (tx as TxWithTempoExtras<Tx>).validAfter,
+  };
+
+  const maxPriorityFee = +(tx.maxPriorityFeePerGas || '');
+  const maxFeePerGas = tx.maxFeePerGas || tx.gasPrice;
+
+  if (support1559) {
+    transaction.maxFeePerGas = maxFeePerGas;
+    transaction.maxPriorityFeePerGas =
+      maxPriorityFee < 0
+        ? tx.maxFeePerGas
+        : intToHex(Math.round(maxPriorityFee));
+  } else {
+    (transaction as Tx).gasPrice = maxFeePerGas;
+  }
+
+  const transactionForSubmit = shouldUseTempoTx
+    ? ({
+        ...(buildTempoTx(transaction as any, {
+          stripTopLevelData: true,
+          feePayer: shouldUseTempoCallsForGasAccount,
+        }) as any),
+      } as any)
+    : transaction;
+
+  // fetch action data
+  const actionData = await openapi.parseTx({
+    chainId: chain.serverId,
+    tx: shouldUseTempoTx
+      ? (buildTempoTx(
+          {
+            ...tx,
+            gas: '0x0',
+            nonce: tx.nonce || '0x1',
+            value: tx.value || '0x0',
+            to: tx.to || '',
+          },
+          {
+            stripTopLevelData: true,
+            feePayer: shouldUseTempoCallsForGasAccount,
+          },
+        ) as any)
+      : ({
+          ...tx,
+          gas: '0x0',
+          nonce: tx.nonce || '0x1',
+          value: tx.value || '0x0',
+          to: tx.to || '',
+          type: is7702Tx(tx) ? 4 : support1559 ? 2 : undefined,
+        } as any),
+    origin: INTERNAL_REQUEST_SESSION.origin || '',
+    addr: currentAccount.address,
+  });
+  const parsed = parseAction({
+    type: 'transaction',
+    data: actionData.action,
+    balanceChange: preExecResult.balance_change,
+    tx: shouldUseTempoTx
+      ? (buildTempoTx(
+          {
+            ...tx,
+            gas: '0x0',
+            nonce: tx.nonce || '0x1',
+            value: tx.value || '0x0',
+          },
+          {
+            stripTopLevelData: true,
+            feePayer: shouldUseTempoCallsForGasAccount,
+          },
+        ) as any)
+      : {
+          ...tx,
+          gas: '0x0',
+          nonce: tx.nonce || '0x1',
+          value: tx.value || '0x0',
+        },
+    preExecVersion: preExecResult.pre_exec_version,
+    gasUsed: preExecResult.gas.gas_used,
+    sender: tx.from,
+  });
+  const cexInfo = getCexInfo(parsed.send?.to || '');
+  const requiredData = await fetchActionRequiredData({
+    type: 'transaction',
+    actionData: parsed,
+    contractCall: actionData.contract_call,
+    chainId: chain.serverId,
+    sender: currentAccount.address,
+    cex: cexInfo,
+    walletProvider: {
+      ethRpc: apiProvider.requestETHRpc,
+      hasPrivateKeyInWallet: apiKeyring.hasPrivateKeyInWallet,
+      hasAddress: keyringServiceApi.hasAddress,
+      getWhitelist: async () => whitelistServiceApi.getWhitelist(),
+      isWhitelistEnabled: async () => whitelistServiceApi.isWhitelistEnabled(),
+      getPendingTxsByNonce: async (...args) =>
+        transactionHistoryServiceApi.getPendingTxsByNonce(...args),
+      findChain,
+      ALIAS_ADDRESS,
+    },
+    tx: {
+      ...(shouldUseTempoTx
+        ? (buildTempoTx(
+            {
+              ...tx,
+              gas: '0x0',
+              nonce: tx.nonce || '0x1',
+              value: tx.value || '0x0',
+            },
+            {
+              stripTopLevelData: true,
+              feePayer: shouldUseTempoCallsForGasAccount,
+            },
+          ) as any)
+        : {
+            ...tx,
+            gas: '0x0',
+            nonce: tx.nonce || '0x1',
+            value: tx.value || '0x0',
+          }),
+    },
+    apiProvider: openapi,
+  });
+
+  await transactionHistoryServiceApi.updateSigningTx(signingTxId, {
+    rawTx: {
+      nonce: tx.nonce,
+    },
+    explain: {
+      ...preExecResult,
+      calcSuccess: true,
+    },
+    action: {
+      actionData: parsed,
+      requiredData,
+    },
+  });
+
+  onProgress?.('builded');
+
+  const handleSendAfter = async () => {
+    const statsData = await notificationServiceApi.getStatsData();
+
+    if (statsData?.signed) {
+      const sData: any = {
+        type: statsData?.type,
+        chainId: statsData?.chainId,
+        category: statsData?.category,
+        success: statsData?.signedSuccess,
+        preExecSuccess: statsData?.preExecSuccess,
+        createdBy: statsData?.createdBy,
+        source: statsData?.source,
+        trigger: statsData?.trigger,
+        networkType: statsData?.networkType,
+      };
+      if (statsData.signMethod) {
+        sData.signMethod = statsData.signMethod;
+      }
+      stats.report('signedTransaction', sData);
+    }
+    if (statsData?.submit) {
+      stats.report('submitTransaction', {
+        type: statsData?.type,
+        chainId: statsData?.chainId,
+        category: statsData?.category,
+        success: statsData?.submitSuccess,
+        preExecSuccess: statsData?.preExecSuccess,
+        createdBy: statsData?.createdBy,
+        source: statsData?.source,
+        trigger: statsData?.trigger,
+        networkType: statsData?.networkType || '',
+      });
+    }
+  };
+
+  stats.report('signTransaction', {
+    type: currentAccount.brandName,
+    category: KEYRING_CATEGORY_MAP[currentAccount.type],
+    chainId: chain.serverId,
+    createdBy: ga ? 'rabby' : 'dapp',
+    source: ga?.source || '',
+    trigger: ga?.trigger || '',
+    networkType: chain?.isTestnet ? 'Custom Network' : 'Integrated Network',
+  });
+
+  // submit tx
+  let hash = '';
+  const account = currentAccount;
+  try {
+    hash = await apiProvider.ethSendTransaction({
+      data: {
+        $ctx: {
+          ga,
+        },
+        params: [
+          {
+            ...transactionForSubmit,
+            isSpeedUp: (tx as any)?.isSpeedUp,
+            isCancel: (tx as any)?.isCancel,
+          },
+        ],
+      },
+      session: INTERNAL_REQUEST_SESSION,
+      approvalRes: {
+        ...transactionForSubmit,
+        signingTxId,
+        lowGasDeadline,
+        isGasLess,
+        isGasAccount,
+        pushType,
+        sig,
+      },
+      pushed: false,
+      result: undefined,
+      account: account,
+    });
+    await handleSendAfter();
+  } catch (e) {
+    await handleSendAfter();
+    const err = new Error((e as any).message);
+    err.name = FailedCode.SubmitTxFailed;
+    eventBus.emit(EVENTS.COMMON_HARDWARE.REJECTED, err.message);
+    throw err;
+  }
+
+  onProgress?.('signed');
+
+  return {
+    txHash: hash,
+  };
+};

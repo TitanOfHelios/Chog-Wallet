@@ -1,0 +1,209 @@
+import { AppBottomSheetModal } from '@/components/customized/BottomSheet';
+import { makeBottomSheetProps } from '@/components2024/GlobalBottomSheetModal/utils-help';
+import type { Account } from '@/core/startupServices/preference';
+import { useAccounts } from '@/hooks/account';
+import { useSwitchSceneCurrentAccount } from '@/hooks/accountsSwitcher';
+import { useTheme2024 } from '@/hooks/theme';
+import { createGetStyles2024 } from '@/utils/styles';
+import { BottomSheetScrollView } from '@gorhom/bottom-sheet';
+import { useMemoizedFn } from 'ahooks';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import { useWindowDimensions, View } from 'react-native';
+import LinearGradient from 'react-native-linear-gradient';
+import { useGasAccountInfo, useGasAccountMethods } from '../hooks';
+import { useGasAccountSign } from '../hooks/atom';
+import { SelectGasAccountList } from './SelectGasAccountList';
+import { toast } from '@/components2024/Toast';
+import { filterMyAccounts } from '@/utils/account';
+import { isSameAddress } from '@rabby-wallet/base-utils/dist/isomorphic/address';
+import { Text } from '@/components/Typography';
+
+const GasAccountLoginContent: React.FC<{
+  onLogin?(): void;
+}> = ({ onLogin }) => {
+  const { styles, colors2024 } = useTheme2024({ getStyle });
+  const { t } = useTranslation();
+  const { login } = useGasAccountMethods();
+  const { value: gasAccountInfo } = useGasAccountInfo();
+  const { account: sessionAccount } = useGasAccountSign();
+  const { accounts } = useAccounts({
+    disableAutoFetch: true,
+  });
+  const filterAccounts = useMemo(
+    () => [...filterMyAccounts(accounts)],
+    [accounts],
+  );
+  const [loading, setLoading] = useState(false);
+
+  const { switchSceneCurrentAccount } = useSwitchSceneCurrentAccount();
+  const currentLoginAccount = useMemo(() => {
+    const address = gasAccountInfo?.account?.id || sessionAccount?.address;
+    if (!address) {
+      return null;
+    }
+
+    return (
+      filterAccounts.find(
+        item =>
+          isSameAddress(address, item.address) &&
+          (!sessionAccount?.type || item.type === sessionAccount.type),
+      ) ||
+      filterAccounts.find(item => isSameAddress(address, item.address)) ||
+      null
+    );
+  }, [
+    filterAccounts,
+    gasAccountInfo?.account?.id,
+    sessionAccount?.address,
+    sessionAccount?.type,
+  ]);
+  const [selectedAccount, setSelectAccount] = useState(currentLoginAccount);
+
+  const confirmAddress = useMemoizedFn(async (account: Account) => {
+    setSelectAccount(account);
+    if (loading) {
+      return;
+    }
+    setLoading(true);
+    try {
+      await switchSceneCurrentAccount('GasAccount', account);
+      await login(account);
+      await onLogin?.();
+      toast.success(t('page.gasAccount.loginSuccess'));
+    } catch (error) {
+      console.error(error);
+      toast.error(t('page.gasAccount.loginFailed'));
+    }
+
+    setLoading(false);
+  });
+
+  useEffect(() => {
+    setSelectAccount(currentLoginAccount);
+  }, [currentLoginAccount]);
+
+  return (
+    <LinearGradient
+      colors={[colors2024['neutral-bg-1'], colors2024['neutral-bg-3']]}
+      locations={[0.0745, 0.2242]}
+      start={{ x: 0, y: 0 }}
+      style={styles.loginGradient}
+      end={{ x: 0, y: 1 }}>
+      <View style={styles.loginConfirmContainer}>
+        <View style={styles.handleView}>
+          <Text style={styles.confirmTitle}>
+            {t('component.gasAccount.loginConfirmModal.title')}
+          </Text>
+        </View>
+
+        <SelectGasAccountList
+          isGasAccount
+          style={styles.list}
+          value={selectedAccount || undefined}
+          listHeader={
+            <View style={styles.listHeader}>
+              <Text style={styles.listLabel}>
+                {t('page.gasAccount.gasAccountList.wallet')}
+              </Text>
+              <Text style={styles.listLabel}>
+                {t('page.gasAccount.gasAccountList.gasAccountBalance')}
+              </Text>
+            </View>
+          }
+          onChange={confirmAddress}
+        />
+      </View>
+    </LinearGradient>
+  );
+};
+
+export const GasAccountLoginPopup: React.FC<{
+  visible?: boolean;
+  onClose?(): void;
+  onLogin?(): void;
+}> = ({ visible, onClose, onLogin }) => {
+  const { styles, colors2024 } = useTheme2024({ getStyle });
+  const modalRef = useRef<AppBottomSheetModal>(null);
+
+  useEffect(() => {
+    if (!visible) {
+      modalRef.current?.close();
+    } else {
+      modalRef.current?.present();
+    }
+  }, [visible]);
+
+  const { height } = useWindowDimensions();
+  const maxHeight = height - 200;
+
+  return (
+    <AppBottomSheetModal
+      onDismiss={onClose}
+      ref={modalRef}
+      {...makeBottomSheetProps({
+        linearGradientType: 'bg1',
+        colors: colors2024,
+      })}
+      enableDynamicSizing
+      maxDynamicContentSize={maxHeight}
+      handleStyle={styles.handleStyle}>
+      <BottomSheetScrollView style={styles.popup}>
+        <GasAccountLoginContent onLogin={onLogin} />
+      </BottomSheetScrollView>
+    </AppBottomSheetModal>
+  );
+};
+
+const getStyle = createGetStyles2024(({ colors2024, colors }) => ({
+  loginGradient: {
+    width: '100%',
+    height: '100%',
+    paddingBottom: 44,
+  },
+  popup: {
+    margin: 0,
+    height: '100%',
+    minHeight: 364,
+  },
+  handleStyle: {
+    backgroundColor: 'transparent',
+    paddingTop: 10,
+    height: 36,
+  },
+  handleView: {
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  loginConfirmContainer: {
+    flex: 1,
+    alignItems: 'center',
+    width: '100%',
+    height: '100%',
+  },
+  confirmTitle: {
+    fontSize: 20,
+    fontFamily: 'SF Pro Rounded',
+    fontWeight: '800',
+    color: colors['neutral-title1'],
+    paddingBottom: 0,
+  },
+  list: {
+    marginTop: 20,
+  },
+  listHeader: {
+    width: '100%',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 6,
+    marginBottom: 12,
+  },
+  listLabel: {
+    color: colors2024['neutral-secondary'],
+    fontFamily: 'SF Pro Rounded',
+    fontSize: 17,
+    fontWeight: '400',
+    lineHeight: 22,
+  },
+}));

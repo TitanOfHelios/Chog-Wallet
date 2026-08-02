@@ -1,0 +1,1176 @@
+import { useTheme2024 } from '@/hooks/theme';
+import { createGetStyles2024 } from '@/utils/styles';
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
+import { View, Pressable, TouchableOpacity } from 'react-native';
+import AutoLockView from '@/components/AutoLockView';
+import type { PopupDetailProps } from '../../type';
+import { formatAmountValueKMB } from '@/screens/TokenDetail/util';
+import { TokenAmountInput } from './TokenAmountInput';
+import {
+  useLendingSummary,
+  usePoolDataProviderContract,
+  useSelectedMarket,
+} from '../../hooks';
+import { isSameAddress } from '@rabby-wallet/base-utils/dist/isomorphic/address';
+import BigNumber from 'bignumber.js';
+import { BottomSheetScrollView } from '@gorhom/bottom-sheet';
+import { buildRepayTx, optimizedPath } from '../../poolService';
+import type { DirectSignBtnMethods } from '@/components2024/DirectSignBtn';
+import { DirectSignBtn } from '@/components2024/DirectSignBtn';
+import { useSceneAccountInfo } from '@/hooks/accountsSwitcher';
+import { DirectSignGasInfo } from '@/screens/Bridge/components/BridgeShowMore';
+import { isAccountSupportMiniApproval } from '@/utils/account';
+import type { Tx } from '@rabby-wallet/rabby-api/dist/types';
+import { toast } from '@/components2024/Toast';
+import RepayActionOverView from './RepayActionOverView';
+import { parseUnits } from 'viem';
+import {
+  calculateHFAfterRepay,
+  calculateHFAfterRepayWithAToken,
+} from '../../utils/hfUtils';
+import { getERC20Allowance } from '@/core/apis/provider';
+import { approveToken } from '@/core/apis/approvals';
+import { ETH_USDT_CONTRACT } from '@/constant/swap';
+import { useMiniSigner } from '@/hooks/useSigner';
+import { debounce, last, noop } from 'lodash';
+import { formatTokenAmount } from '@/utils/number';
+import { useTranslation } from 'react-i18next';
+import { transactionHistoryServiceApi } from '@/core/serviceApi/transactionHistory';
+import {
+  CUSTOM_HISTORY_ACTION,
+  CUSTOM_HISTORY_TITLE_TYPE,
+  LendingReportType,
+  LendingSignType,
+} from '@/screens/Transaction/components/type';
+import { useRefreshHistoryId } from '../../hooks';
+import { APP_VERSIONS, INTERNAL_REQUEST_SESSION } from '@/constant';
+import { apiProvider } from '@/core/apis';
+import { Button } from '@/components2024/Button';
+import { MINI_SIGN_ERROR } from '@/components2024/MiniSignV2/state/SignatureManager';
+import { SignatureInstanceProvider } from '@/components2024/MiniSignV2/state/SignatureInstanceContext';
+import { useSignatureStoreOf } from '@/components2024/MiniSignV2/state/useSignatureStore';
+import { CHAINS_ENUM } from '@debank/common';
+import {
+  API_ETH_MOCK_ADDRESS,
+  REPAY_AMOUNT_MULTIPLIER,
+} from '../../utils/constant';
+import RepayWithCollateral from './RepayWithCollateralContent';
+import { getCollateralToken, getFromToken } from '../../utils/swap';
+import { isSupportRepayWithCollateral } from './RepayWithCollateralContent/utils';
+import wrapperToken from '../../config/wrapperToken';
+import {
+  displayGhoForMintableMarket,
+  getSupplyCapData,
+} from '../../utils/supply';
+import {
+  createGlobalBottomSheetModal2024,
+  removeGlobalBottomSheetModal2024,
+} from '@/components2024/GlobalBottomSheetModal';
+import { MODAL_NAMES } from '@/components2024/GlobalBottomSheetModal/types';
+import type { IAvailableRepayToken } from '../RepayTokenModal';
+import { stats } from '@/utils/stats';
+import { isZeroAmount } from '../../utils/number';
+import { Text } from '@/components/Typography';
+import { switchSceneCurrentAccount } from '@/hooks/accountsSwitcher';
+import {
+  BOTTOM_BUTTON_SINGLE_HEIGHT,
+  BOTTOM_BUTTON_TITLE_STYLE,
+  BOTTOM_BUTTON_WITH_ICON_TITLE_STYLE,
+  RootNames,
+  getBottomButtonBottomOffset,
+} from '@/constant/layout';
+import { naviPush } from '@/utils/navigation';
+import { isUserCancelledError } from '../../utils/error';
+
+export const RepayActionPopupContent: React.FC<PopupDetailProps> = ({
+  reserve,
+  userSummary,
+  onClose,
+  source,
+}) => {
+  const { styles, colors2024, isLight } = useTheme2024({ getStyle: getStyles });
+  const [_amount, setAmount] = useState<string | undefined>(undefined);
+  const [isLoading, setIsLoading] = useState(false);
+  const [needApprove, setNeedApprove] = useState(false);
+  const [repayTx, setRepayTx] = useState<any>(null);
+  const { refresh } = useRefreshHistoryId();
+  const [approveTxs, setApproveTxs] = useState<any>(null);
+  const [isAtTokenRepay, setIsAtTokenRepay] = useState(false);
+
+  const { isMainnet, chainInfo, chainEnum, selectedMarketData } =
+    useSelectedMarket();
+  const { formattedPoolReservesAndIncentives, getTargetReserve } =
+    useLendingSummary();
+
+  const currentReserve = useMemo(() => {
+    return getTargetReserve(reserve.underlyingAsset) || reserve;
+  }, [getTargetReserve, reserve]);
+
+  const availableRepayTokens = useMemo(() => {
+    const poolReserve = formattedPoolReservesAndIncentives.find(item =>
+      isSameAddress(item.underlyingAsset, reserve.underlyingAsset),
+    );
+    if (!poolReserve) {
+      return [];
+    }
+    const _tokens: IAvailableRepayToken[] = [
+      {
+        address: poolReserve.underlyingAsset,
+        symbol: poolReserve.symbol,
+        aToken: false,
+        decimals: poolReserve.decimals,
+        balance: currentReserve.walletBalance || '0',
+      },
+    ];
+    if (
+      selectedMarketData?.v3 &&
+      !displayGhoForMintableMarket({
+        symbol: poolReserve.symbol,
+        currentMarket: selectedMarketData?.market,
+      })
+    ) {
+      _tokens.push({
+        address: poolReserve.aTokenAddress,
+        symbol: `a${poolReserve.symbol}`,
+        aToken: true,
+        balance: currentReserve.underlyingBalance,
+        decimals: poolReserve.decimals,
+      });
+    }
+    return _tokens;
+  }, [
+    currentReserve.underlyingBalance,
+    currentReserve.walletBalance,
+    formattedPoolReservesAndIncentives,
+    reserve,
+    selectedMarketData?.market,
+    selectedMarketData?.v3,
+  ]);
+
+  const selectedRepayToken = useMemo(() => {
+    if (availableRepayTokens.length <= 1) {
+      return availableRepayTokens[0];
+    }
+    if (isAtTokenRepay) {
+      return availableRepayTokens[1];
+    }
+    return availableRepayTokens[0];
+  }, [availableRepayTokens, isAtTokenRepay]);
+
+  const repayAmount = useMemo(() => {
+    const miniAmount = BigNumber(selectedRepayToken?.balance || '0').gt(
+      reserve.variableBorrows,
+    )
+      ? reserve.variableBorrows
+      : selectedRepayToken?.balance;
+    const usdValue = BigNumber(miniAmount || '0')
+      .multipliedBy(reserve.reserve.formattedPriceInMarketReferenceCurrency)
+      .toString();
+    const isDebtUp = BigNumber(miniAmount || '0').eq(reserve.variableBorrows);
+    return {
+      amount: miniAmount,
+      usdValue,
+      isDebtUp,
+    };
+  }, [
+    selectedRepayToken?.balance,
+    reserve.variableBorrows,
+    reserve.reserve.formattedPriceInMarketReferenceCurrency,
+  ]);
+  const amount = useMemo(() => {
+    return _amount === '-1' ? repayAmount.amount : _amount;
+  }, [_amount, repayAmount.amount]);
+
+  const { t } = useTranslation();
+
+  const { finalSceneCurrentAccount: currentAccount } = useSceneAccountInfo({
+    forScene: 'Lending',
+  });
+
+  const { pools } = usePoolDataProviderContract();
+  const canShowDirectSubmit = useMemo(
+    //() => false,
+    () => isAccountSupportMiniApproval(currentAccount?.type || ''),
+    [currentAccount?.type],
+  );
+  const directSignBtnRef = useRef<DirectSignBtnMethods>(null);
+
+  const afterHF = useMemo(() => {
+    if (!amount || isZeroAmount(amount)) {
+      return undefined;
+    }
+    const targetPool = formattedPoolReservesAndIncentives.find(item =>
+      isSameAddress(item.underlyingAsset, reserve.underlyingAsset),
+    );
+    if (!targetPool) {
+      return undefined;
+    }
+    if (isAtTokenRepay) {
+      return calculateHFAfterRepayWithAToken({
+        user: userSummary,
+        amount,
+        debt: reserve.variableBorrows,
+        usdPrice: reserve.reserve.formattedPriceInMarketReferenceCurrency,
+      }).toString();
+    }
+    return calculateHFAfterRepay({
+      user: userSummary,
+      amount,
+      debt: reserve.variableBorrows,
+      usdPrice: reserve.reserve.formattedPriceInMarketReferenceCurrency,
+    }).toString();
+  }, [
+    amount,
+    formattedPoolReservesAndIncentives,
+    isAtTokenRepay,
+    reserve,
+    userSummary,
+  ]);
+
+  const checkApproveStatus = useCallback(async () => {
+    if (!amount || isZeroAmount(amount) || !currentAccount || isAtTokenRepay) {
+      setNeedApprove(false);
+      return;
+    }
+    if (!selectedMarketData) {
+      return;
+    }
+    try {
+      if (!chainInfo) {
+        return;
+      }
+
+      // 如果是原生代币，不需要approve
+      if (
+        isSameAddress(reserve.underlyingAsset, chainInfo.nativeTokenAddress)
+      ) {
+        setNeedApprove(false);
+        return;
+      }
+
+      // 获取当前approve额度
+      const allowance = await getERC20Allowance(
+        chainInfo.serverId,
+        reserve.underlyingAsset,
+        selectedMarketData.addresses.LENDING_POOL,
+        currentAccount.address,
+        currentAccount,
+      );
+
+      // 计算需要的额度（包含decimals）
+      const requiredAmount = new BigNumber(amount)
+        .multipliedBy(10 ** reserve.reserve.decimals)
+        .toString();
+
+      // 检查当前额度是否足够
+      const isApproved = new BigNumber(allowance || '0').gte(requiredAmount);
+      setNeedApprove(!isApproved);
+    } catch (error) {
+      console.error('Check approve status error:', error);
+      setNeedApprove(true); // 出错时默认需要approve
+    }
+  }, [
+    amount,
+    currentAccount,
+    isAtTokenRepay,
+    selectedMarketData,
+    chainInfo,
+    reserve.underlyingAsset,
+    reserve.reserve.decimals,
+  ]);
+
+  const buildTransactions = useCallback(async () => {
+    if (!amount || isZeroAmount(amount) || !currentAccount?.address) {
+      setRepayTx(null);
+      setApproveTxs(null);
+      return;
+    }
+    if (!selectedMarketData || !pools) {
+      return;
+    }
+    try {
+      setIsLoading(true);
+      if (!chainInfo) {
+        return;
+      }
+
+      const targetPool = formattedPoolReservesAndIncentives.find(item =>
+        isSameAddress(item.underlyingAsset, reserve.underlyingAsset),
+      );
+
+      const txs: any[] = [];
+
+      let actualNeedApprove = false;
+      let allowance = '0';
+      if (
+        !isSameAddress(reserve.underlyingAsset, chainInfo.nativeTokenAddress) &&
+        !isAtTokenRepay
+      ) {
+        allowance = await getERC20Allowance(
+          chainInfo.serverId,
+          reserve.underlyingAsset,
+          selectedMarketData.addresses.LENDING_POOL,
+          currentAccount.address,
+          currentAccount,
+        );
+
+        const requiredAmount = new BigNumber(amount)
+          .multipliedBy(10 ** reserve.reserve.decimals)
+          .toString();
+
+        actualNeedApprove = !new BigNumber(allowance || '0').gte(
+          requiredAmount,
+        );
+      }
+
+      // 如果需要approve，构建approve交易
+      if (actualNeedApprove) {
+        const approveAmount = new BigNumber(amount)
+          .multipliedBy(_amount === '-1' ? REPAY_AMOUNT_MULTIPLIER : 1)
+          .multipliedBy(10 ** reserve.reserve.decimals)
+          .integerValue(BigNumber.ROUND_UP)
+          .toFixed(0);
+
+        const requiredAmount = new BigNumber(amount)
+          .multipliedBy(10 ** reserve.reserve.decimals)
+          .toString();
+
+        // 检查是否需要两步approve（针对以太坊上的USDT）
+        let shouldTwoStepApprove = false;
+        if (
+          isMainnet &&
+          isSameAddress(reserve.underlyingAsset, ETH_USDT_CONTRACT) &&
+          Number(allowance) !== 0 &&
+          !new BigNumber(allowance || '0').gte(requiredAmount)
+        ) {
+          shouldTwoStepApprove = true;
+        }
+
+        // 如果需要两步approve，先执行0额度approve
+        if (shouldTwoStepApprove) {
+          const zeroApproveResult = await approveToken({
+            chainServerId: chainInfo.serverId,
+            id: reserve.underlyingAsset,
+            spender: selectedMarketData.addresses.LENDING_POOL,
+            amount: 0,
+            account: currentAccount,
+            isBuild: true,
+          });
+
+          const zeroApproveTxBuilt = {
+            ...zeroApproveResult.params[0],
+            from: zeroApproveResult.params[0].from || currentAccount.address,
+            value: zeroApproveResult.params[0].value ?? '0x0',
+            chainId: zeroApproveResult.params[0].chainId || chainInfo.id,
+          };
+
+          txs.push(zeroApproveTxBuilt);
+        }
+
+        // 执行正常额度的approve
+        const approveResult = await approveToken({
+          chainServerId: chainInfo.serverId,
+          id: reserve.underlyingAsset,
+          spender: selectedMarketData.addresses.LENDING_POOL,
+          amount: approveAmount,
+          account: currentAccount,
+          isBuild: true,
+        });
+
+        const approveTxBuilt = {
+          ...approveResult.params[0],
+          from: approveResult.params[0].from || currentAccount.address,
+          value: approveResult.params[0].value ?? '0x0',
+          chainId: approveResult.params[0].chainId || chainInfo.id,
+        };
+
+        txs.push(approveTxBuilt);
+        setApproveTxs(txs);
+      }
+
+      if (!targetPool?.aTokenAddress) {
+        return;
+      }
+      const repayResult = await buildRepayTx({
+        poolBundle: pools.poolBundle,
+        amount:
+          _amount === '-1'
+            ? '-1'
+            : parseUnits(amount, targetPool.decimals).toString(),
+        address: currentAccount.address,
+        reserve: reserve.underlyingAsset,
+        useOptimizedPath: optimizedPath(selectedMarketData?.chainId),
+        repayWithATokens: isAtTokenRepay,
+      });
+      delete repayResult.gasLimit;
+
+      setRepayTx({
+        ...repayResult,
+        chainId: chainInfo.id,
+      });
+    } catch (error) {
+      console.error('Build transactions error:', error);
+      toast.error('something error');
+      setRepayTx(null);
+      setApproveTxs(null);
+    } finally {
+      setIsLoading(false);
+    }
+    //currentAccount is not stable
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    _amount,
+    amount,
+    chainInfo,
+    currentAccount?.address,
+    formattedPoolReservesAndIncentives,
+    isAtTokenRepay,
+    isMainnet,
+    pools,
+    reserve.reserve.decimals,
+    reserve.underlyingAsset,
+    selectedMarketData,
+  ]);
+
+  const txsForMiniApproval: Tx[] = useMemo(() => {
+    const list: any[] = [];
+    if (approveTxs?.length) {
+      list.push(...approveTxs);
+    }
+    if (repayTx) {
+      list.push(repayTx);
+    }
+    return list as Tx[];
+  }, [approveTxs, repayTx]);
+
+  const {
+    openDirect,
+    prefetch: prefetchMiniSigner,
+    instance,
+  } = useMiniSigner({
+    account: currentAccount!,
+    chainServerId: txsForMiniApproval.length
+      ? txsForMiniApproval?.[0]?.chainId + ''
+      : '',
+    autoResetGasStoreOnChainChange: true,
+  });
+
+  const { ctx } = useSignatureStoreOf(instance);
+
+  const handleRepay = useCallback(
+    async (forceFullSign?: boolean) => {
+      if (
+        !currentAccount ||
+        !txsForMiniApproval?.length ||
+        !amount ||
+        isZeroAmount(amount)
+      ) {
+        return;
+      }
+
+      try {
+        setIsLoading(true);
+        if (!txsForMiniApproval?.length) {
+          toast.info('please retry');
+          throw new Error('no txs');
+        }
+        let results: string[] = [];
+        const signType =
+          canShowDirectSubmit && !forceFullSign
+            ? LendingSignType.Simplified
+            : LendingSignType.Full;
+        if (canShowDirectSubmit && !forceFullSign) {
+          try {
+            results = await openDirect({
+              txs: txsForMiniApproval,
+              ga: {
+                customAction: CUSTOM_HISTORY_ACTION.LENDING,
+                customActionTitleType: CUSTOM_HISTORY_TITLE_TYPE.LENDING_REPAY,
+              },
+            });
+          } catch (error) {
+            if (error === MINI_SIGN_ERROR.USER_CANCELLED) {
+              setAmount(undefined);
+              onClose?.();
+            }
+            if (error === MINI_SIGN_ERROR.PREFETCH_FAILURE) {
+              handleRepay(true);
+            }
+            return;
+          }
+        } else {
+          for (const tx of txsForMiniApproval) {
+            const result = await apiProvider.sendRequest({
+              data: {
+                method: 'eth_sendTransaction',
+                params: [tx],
+                $ctx: {
+                  ga: {
+                    customAction: CUSTOM_HISTORY_ACTION.LENDING,
+                    customActionTitleType:
+                      CUSTOM_HISTORY_TITLE_TYPE.LENDING_REPAY,
+                  },
+                },
+              },
+              session: INTERNAL_REQUEST_SESSION,
+              account: currentAccount,
+            });
+            results.push(result);
+          }
+        }
+        const txId = last(results);
+        if (txId && txsForMiniApproval[0]?.chainId) {
+          await transactionHistoryServiceApi.setCustomTxItem(
+            currentAccount.address,
+            txsForMiniApproval[0].chainId,
+            txId,
+            { actionType: CUSTOM_HISTORY_TITLE_TYPE.LENDING_REPAY },
+          );
+        }
+
+        const poolReserve = formattedPoolReservesAndIncentives.find(item =>
+          isSameAddress(item.underlyingAsset, reserve.underlyingAsset),
+        );
+        const usdValue = poolReserve
+          ? new BigNumber(amount || '0')
+              .multipliedBy(
+                BigNumber(
+                  poolReserve.formattedPriceInMarketReferenceCurrency || '0',
+                ),
+              )
+              .toString()
+          : '0';
+
+        stats.report('aaveInternalTx', {
+          tx_type: isAtTokenRepay
+            ? LendingReportType.RepayWithAToken
+            : LendingReportType.Repay,
+          chain: chainInfo?.serverId || '',
+          tx_id: txId || '',
+          user_addr: currentAccount.address || '',
+          address_type: currentAccount.type || '',
+          usd_value: usdValue,
+          create_at: Date.now(),
+          app_version: APP_VERSIONS.fromNative || '0',
+          signType,
+          ...(source ? { source } : {}),
+        });
+
+        refresh();
+        toast.success(
+          `${t('page.Lending.repayDetail.actions')} ${t(
+            'page.Lending.submitted',
+          )}`,
+        );
+        setAmount(undefined);
+        onClose?.();
+      } catch (error) {
+        console.error('Handle repay error:', error);
+        if (forceFullSign && isUserCancelledError(error)) {
+          await buildTransactions();
+        }
+      } finally {
+        setIsLoading(false);
+      }
+    },
+    [
+      currentAccount,
+      txsForMiniApproval,
+      amount,
+      canShowDirectSubmit,
+      formattedPoolReservesAndIncentives,
+      isAtTokenRepay,
+      chainInfo?.serverId,
+      refresh,
+      t,
+      onClose,
+      openDirect,
+      reserve.underlyingAsset,
+      source,
+      buildTransactions,
+    ],
+  );
+
+  const afterRepayAmount = useMemo(() => {
+    return BigNumber(reserve.variableBorrows)
+      .minus(amount || '0')
+      .toString();
+  }, [amount, reserve.variableBorrows]);
+
+  const afterRepayUsdValue = useMemo(() => {
+    return BigNumber(afterRepayAmount || '0')
+      .multipliedBy(reserve.reserve.formattedPriceInMarketReferenceCurrency)
+      .toString();
+  }, [
+    afterRepayAmount,
+    reserve.reserve.formattedPriceInMarketReferenceCurrency,
+  ]);
+
+  const showToSwap = useMemo(() => {
+    return (
+      !isAtTokenRepay &&
+      new BigNumber(selectedRepayToken?.balance || '0').lte(0) &&
+      new BigNumber(reserve.variableBorrows || '0').gt(0)
+    );
+  }, [isAtTokenRepay, reserve.variableBorrows, selectedRepayToken?.balance]);
+
+  const swapTokenId = useMemo(() => {
+    if (isSameAddress(reserve.reserve.underlyingAsset, API_ETH_MOCK_ADDRESS)) {
+      return chainInfo?.nativeTokenAddress || reserve.reserve.underlyingAsset;
+    }
+    return reserve.reserve.underlyingAsset;
+  }, [chainInfo?.nativeTokenAddress, reserve.reserve.underlyingAsset]);
+
+  const openSwap = useCallback(async () => {
+    if (!currentAccount || !swapTokenId) {
+      return;
+    }
+
+    await switchSceneCurrentAccount('MakeTransactionAbout', currentAccount);
+    naviPush(RootNames.StackTransaction, {
+      screen: RootNames.SwapBridge,
+      params: {
+        activeTab: 'swap',
+        chainEnum: chainEnum || CHAINS_ENUM.ETH,
+        tokenId: swapTokenId,
+        type: 'Buy',
+      },
+    });
+  }, [chainEnum, currentAccount, swapTokenId]);
+
+  const handleOpenSwap = useMemo(
+    () =>
+      debounce(openSwap, 800, {
+        leading: true,
+        trailing: false,
+      }),
+    [openSwap],
+  );
+
+  useEffect(() => {
+    return () => {
+      handleOpenSwap.cancel();
+    };
+  }, [handleOpenSwap]);
+
+  const handleChangeAmount = useCallback(
+    (value: string) => {
+      if (directSignBtnRef.current?.isAuthInProgress()) {
+        return;
+      }
+      const maxSelected = value === '-1';
+      if (maxSelected) {
+        // 还清所有债务
+        if (repayAmount.isDebtUp) {
+          setAmount('-1');
+        } else {
+          setAmount(repayAmount.amount?.toString() || '0');
+        }
+      } else {
+        setAmount(value);
+      }
+    },
+    [repayAmount.isDebtUp, repayAmount.amount],
+  );
+
+  const handleClickToken = useCallback(() => {
+    const modalId = createGlobalBottomSheetModal2024({
+      name: MODAL_NAMES.REPAY_TOKEN_SELECT,
+      availableRepayTokens: availableRepayTokens,
+      onChange: v => {
+        setIsAtTokenRepay(v.aToken);
+        removeGlobalBottomSheetModal2024(modalId);
+      },
+      onCancel: () => {
+        removeGlobalBottomSheetModal2024(modalId);
+      },
+      bottomSheetModalProps: {
+        enableContentPanningGesture: true,
+        rootViewType: 'View',
+        handleStyle: {
+          backgroundColor: isLight
+            ? colors2024['neutral-bg-0']
+            : colors2024['neutral-bg-1'],
+        },
+      },
+    });
+  }, [availableRepayTokens, colors2024, isLight]);
+
+  useEffect(() => {
+    checkApproveStatus();
+  }, [checkApproveStatus]);
+
+  useEffect(() => {
+    buildTransactions();
+  }, [buildTransactions]);
+
+  useEffect(() => {
+    if (
+      currentAccount?.address &&
+      canShowDirectSubmit &&
+      amount &&
+      !isZeroAmount(amount)
+    ) {
+      prefetchMiniSigner({
+        txs: txsForMiniApproval?.length ? txsForMiniApproval : [],
+        synGasHeaderInfo: true,
+      });
+    }
+  }, [
+    canShowDirectSubmit,
+    currentAccount?.address,
+    amount,
+    txsForMiniApproval,
+    prefetchMiniSigner,
+  ]);
+
+  return (
+    <SignatureInstanceProvider instance={instance}>
+      <BottomSheetScrollView
+        style={styles.bottomSheetScrollView}
+        showsVerticalScrollIndicator
+        persistentScrollbar
+        contentContainerStyle={styles.contentContainer}>
+        <View style={styles.amountHeader}>
+          <Text style={styles.amountHeaderTitle}>
+            {t('page.Lending.popup.amount')}
+          </Text>
+          <View style={styles.amountHeaderRight}>
+            <Text
+              style={[
+                styles.amountValueDescription,
+                (repayAmount.amount === '0' || !repayAmount.amount) &&
+                  styles.amountValueDescriptionDanger,
+              ]}>{`${formatTokenAmount(repayAmount.amount || '0')} ${
+              reserve.reserve.symbol
+            } ($${formatAmountValueKMB(repayAmount.usdValue || '0')}) ${t(
+              'page.Lending.popup.available',
+            )}`}</Text>
+            {showToSwap ? (
+              <TouchableOpacity activeOpacity={1} onPress={handleOpenSwap}>
+                <Text style={styles.toSwapText}>
+                  {t('page.Lending.popup.toSwap')}→
+                </Text>
+              </TouchableOpacity>
+            ) : null}
+          </View>
+        </View>
+        <TokenAmountInput
+          value={amount}
+          onChange={handleChangeAmount}
+          symbol={selectedRepayToken?.symbol || reserve.reserve.symbol}
+          handleClickMaxButton={() => {
+            handleChangeAmount('-1');
+          }}
+          tokenAmount={Number(repayAmount.amount || '0')}
+          tokenDecimals={
+            selectedRepayToken?.decimals ?? reserve.reserve.decimals
+          }
+          price={Number(
+            reserve.reserve.formattedPriceInMarketReferenceCurrency || '0',
+          )}
+          style={styles.amountInput}
+          onClickToken={
+            // 有aToken选项，并且有质押余额
+            availableRepayTokens.length > 1 &&
+            !!currentReserve.underlyingBalance
+              ? () => {
+                  handleClickToken();
+                }
+              : undefined
+          }
+          chain={chainEnum || CHAINS_ENUM.ETH}
+        />
+        <View style={styles.transactionContainer}>
+          <RepayActionOverView
+            reserve={reserve}
+            amount={amount}
+            userSummary={userSummary}
+            afterRepayAmount={afterRepayAmount}
+            afterRepayUsdValue={afterRepayUsdValue}
+            afterHF={afterHF}
+          />
+
+          {!!amount && !isZeroAmount(amount) && canShowDirectSubmit && (
+            <View style={styles.gasPreContainer}>
+              <DirectSignGasInfo
+                supportDirectSign={true}
+                loading={false}
+                openShowMore={noop}
+                chainServeId={chainInfo?.serverId || ''}
+              />
+            </View>
+          )}
+        </View>
+      </BottomSheetScrollView>
+
+      <View style={styles.buttonContainer}>
+        {canShowDirectSubmit ? (
+          <DirectSignBtn
+            ref={directSignBtnRef}
+            type="aave"
+            iconColor={colors2024['neutral-contrast']}
+            loading={isLoading}
+            loadingType="circle"
+            key={`${amount}-${needApprove}`}
+            showTextOnLoading
+            height={BOTTOM_BUTTON_SINGLE_HEIGHT}
+            titleStyle={BOTTOM_BUTTON_WITH_ICON_TITLE_STYLE}
+            wrapperStyle={styles.directSignBtn}
+            authTitle={t('page.Lending.repayDetail.actions')}
+            title={t('page.Lending.repayDetail.actions')}
+            onFinished={() => handleRepay()}
+            disabled={
+              !amount ||
+              isZeroAmount(amount) ||
+              !txsForMiniApproval?.length ||
+              isLoading ||
+              !currentAccount ||
+              !!ctx?.disabledProcess
+            }
+            // type="primary"
+            syncUnlockTime
+            account={currentAccount}
+            showHardWalletProcess
+          />
+        ) : (
+          <Button
+            type="aave"
+            loadingType="circle"
+            showTextOnLoading
+            containerStyle={styles.fullWidthButton}
+            height={BOTTOM_BUTTON_SINGLE_HEIGHT}
+            titleStyle={BOTTOM_BUTTON_TITLE_STYLE}
+            onPress={() => handleRepay()}
+            title={t('page.Lending.repayDetail.actions')}
+            loading={isLoading}
+            disabled={
+              !amount ||
+              isZeroAmount(amount) ||
+              !txsForMiniApproval?.length ||
+              isLoading ||
+              !currentAccount
+            }
+          />
+        )}
+      </View>
+    </SignatureInstanceProvider>
+  );
+};
+
+export const RepayActionPopup: React.FC<PopupDetailProps> = ({
+  reserve,
+  userSummary,
+  onClose,
+  source,
+}) => {
+  const { styles } = useTheme2024({ getStyle: getStyles });
+  const { t } = useTranslation();
+
+  const [repaySource, setRepaySource] = useState<'wallet' | 'collateral'>(
+    'wallet',
+  );
+  const { chainInfo, selectedMarketData } = useSelectedMarket();
+  const { formattedPoolReservesAndIncentives, displayPoolReserves } =
+    useLendingSummary();
+  const repayToken = useMemo(() => {
+    const r = formattedPoolReservesAndIncentives.find(item =>
+      isSameAddress(item.underlyingAsset, reserve?.underlyingAsset || ''),
+    );
+    if (!r || !chainInfo?.id) {
+      return undefined;
+    }
+    return getFromToken(r, chainInfo?.id, reserve?.variableBorrows || '0');
+  }, [
+    formattedPoolReservesAndIncentives,
+    chainInfo?.id,
+    reserve?.variableBorrows,
+    reserve?.underlyingAsset,
+  ]);
+
+  const defaultCollateralToken = useMemo(() => {
+    const collateralTokens = displayPoolReserves
+      .filter(
+        item =>
+          !isSameAddress(
+            item.underlyingAsset,
+            reserve?.underlyingAsset || '',
+          ) && !getSupplyCapData(item).supplyCapReached,
+      )
+      .sort((a, b) => {
+        return BigNumber(b.underlyingBalanceUSD).comparedTo(
+          a.underlyingBalanceUSD,
+        );
+      });
+    const hasLtvZeroCollateral = collateralTokens
+      .filter(
+        item =>
+          !!item.underlyingBalance &&
+          item.underlyingBalance !== '0' &&
+          item.usageAsCollateralEnabledOnUser,
+      )
+      .some(item => item.reserve.baseLTVasCollateral === '0');
+    // 如果有ltv 为 0的抵押物，必须优先还款
+    const displayReserve = hasLtvZeroCollateral
+      ? collateralTokens.filter(
+          item => item.reserve.baseLTVasCollateral === '0',
+        )?.[0]
+      : collateralTokens?.[0];
+
+    const r = formattedPoolReservesAndIncentives.find(item => {
+      return isSameAddress(
+        displayReserve?.underlyingAsset || '',
+        API_ETH_MOCK_ADDRESS,
+      )
+        ? isSameAddress(
+            item.underlyingAsset,
+            wrapperToken?.[displayReserve?.chain || CHAINS_ENUM.ETH]?.address,
+          )
+        : isSameAddress(
+            item.underlyingAsset,
+            displayReserve?.underlyingAsset || '',
+          );
+    });
+    if (!r || !chainInfo?.id || r.isFrozen) {
+      return undefined;
+    }
+    return getCollateralToken(
+      r,
+      chainInfo?.id,
+      displayReserve?.underlyingBalance || '0',
+    );
+  }, [
+    displayPoolReserves,
+    formattedPoolReservesAndIncentives,
+    chainInfo?.id,
+    reserve?.underlyingAsset,
+  ]);
+
+  const showSwitch = useMemo(() => {
+    return isSupportRepayWithCollateral(chainInfo?.id || 0, selectedMarketData);
+  }, [chainInfo?.id, selectedMarketData]);
+
+  return (
+    <AutoLockView style={styles.container}>
+      <Text style={styles.title}>
+        {t('page.Lending.repayDetail.actions')} {reserve.reserve.symbol}
+      </Text>
+      {showSwitch && (
+        <View style={styles.switchContainer}>
+          <Text style={styles.sourceSwitchTitle}>
+            {t('page.Lending.repayDetail.repayWith')}
+          </Text>
+          <View style={styles.sourceSwitchContainer}>
+            <Pressable
+              style={[
+                styles.sourceSwitchTab,
+                repaySource === 'wallet' && styles.sourceSwitchTabActive,
+              ]}
+              onPress={() => setRepaySource('wallet')}>
+              <Text
+                style={[
+                  styles.sourceSwitchTabText,
+                  repaySource === 'wallet' && styles.sourceSwitchTabTextActive,
+                ]}>
+                {t('page.Lending.repayDetail.tabs.wallet')}
+              </Text>
+            </Pressable>
+            <Pressable
+              style={[
+                styles.sourceSwitchTab,
+                repaySource === 'collateral' && styles.sourceSwitchTabActive,
+              ]}
+              onPress={() => setRepaySource('collateral')}>
+              <Text
+                style={[
+                  styles.sourceSwitchTabText,
+                  repaySource === 'collateral' &&
+                    styles.sourceSwitchTabTextActive,
+                ]}>
+                {t('page.Lending.repayDetail.tabs.collateral')}
+              </Text>
+            </Pressable>
+          </View>
+        </View>
+      )}
+      {repaySource === 'wallet' ? (
+        <RepayActionPopupContent
+          reserve={reserve}
+          userSummary={userSummary}
+          onClose={onClose}
+          source={source}
+        />
+      ) : repayToken ? (
+        <RepayWithCollateral
+          onClose={onClose}
+          repayToken={repayToken}
+          defaultCollateralToken={defaultCollateralToken}
+          source={source}
+        />
+      ) : null}
+    </AutoLockView>
+  );
+};
+const getStyles = createGetStyles2024(ctx => ({
+  container: {
+    // paddingHorizontal: 25,
+    height: '100%',
+    position: 'relative',
+    display: 'flex',
+    alignItems: 'center',
+    flexDirection: 'column',
+    paddingHorizontal: 20,
+    backgroundColor: ctx.colors2024['neutral-bg-1'],
+  },
+  switchContainer: {
+    backgroundColor: ctx.colors2024['neutral-bg-1'],
+    width: '100%',
+    zIndex: 999,
+  },
+  amountHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    width: '100%',
+    paddingHorizontal: 4,
+    marginTop: 16,
+  },
+  amountHeaderTitle: {
+    fontSize: 17,
+    lineHeight: 22,
+    fontWeight: '700',
+    color: ctx.colors2024['neutral-title-1'],
+    fontFamily: 'SF Pro Rounded',
+  },
+  amountValueDescription: {
+    fontSize: 14,
+    lineHeight: 18,
+    color: ctx.colors2024['neutral-secondary'],
+    fontFamily: 'SF Pro Rounded',
+    flexShrink: 1,
+    textAlign: 'right',
+  },
+  amountValueDescriptionDanger: {
+    color: ctx.colors2024['red-default'],
+  },
+  amountHeaderRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    flex: 1,
+    justifyContent: 'flex-end',
+    marginLeft: 12,
+  },
+  toSwapText: {
+    color: ctx.colors2024['brand-default'],
+    fontSize: 12,
+    lineHeight: 16,
+    fontWeight: '700',
+    fontFamily: 'SF Pro Rounded',
+    flexShrink: 0,
+  },
+  amountInput: {
+    marginTop: 12,
+  },
+  contentContainer: {
+    paddingHorizontal: 0,
+    paddingBottom: 200,
+    width: '100%',
+  },
+  bottomSheetScrollView: {
+    flex: 1,
+    width: '100%',
+    marginTop: 16,
+    height: '100%',
+    overflow: 'visible',
+    paddingBottom: 140,
+  },
+  transactionContainer: {
+    gap: 12,
+    width: '100%',
+  },
+  gasPreContainer: {
+    paddingHorizontal: 8,
+  },
+  title: {
+    color: ctx.colors2024['neutral-title-1'],
+    fontSize: 20,
+    fontWeight: '900',
+    lineHeight: 24,
+    textAlign: 'center',
+    marginTop: 0,
+    fontFamily: 'SF Pro Rounded',
+    width: '100%',
+    backgroundColor: ctx.colors2024['neutral-bg-1'],
+    zIndex: 999,
+  },
+  sourceSwitchTitle: {
+    marginTop: 16,
+    fontSize: 17,
+    lineHeight: 22,
+    fontWeight: '700',
+    color: ctx.colors2024['neutral-title-1'],
+    fontFamily: 'SF Pro Rounded',
+    textAlign: 'left',
+    width: '100%',
+  },
+  sourceSwitchContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'stretch',
+    marginTop: 12,
+    paddingHorizontal: 4,
+    paddingVertical: 0,
+    borderRadius: 10,
+    backgroundColor: ctx.colors2024['neutral-bg-2'],
+  },
+  sourceSwitchTab: {
+    flex: 1,
+    height: 34,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+  },
+  sourceSwitchTabActive: {
+    backgroundColor: ctx.colors2024['neutral-title-1'],
+  },
+  sourceSwitchTabText: {
+    fontSize: 16,
+    lineHeight: 20,
+    fontFamily: 'SF Pro Rounded',
+    fontWeight: '500',
+    color: ctx.colors2024['neutral-secondary'],
+  },
+  sourceSwitchTabTextActive: {
+    fontWeight: '700',
+    color: ctx.colors2024['neutral-bg-0'],
+  },
+  buttonContainer: {
+    height:
+      12 +
+      BOTTOM_BUTTON_SINGLE_HEIGHT +
+      getBottomButtonBottomOffset(ctx.safeAreaInsets.bottom),
+    paddingTop: 12,
+    marginTop: 'auto',
+    width: '100%',
+    display: 'flex',
+    flexDirection: 'row',
+    gap: 12,
+    backgroundColor: ctx.colors2024['neutral-bg-1'],
+  },
+  directSignBtn: {
+    width: '100%',
+  },
+  fullWidthButton: {
+    flex: 1,
+    height: BOTTOM_BUTTON_SINGLE_HEIGHT,
+  },
+}));

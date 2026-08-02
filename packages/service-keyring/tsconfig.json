@@ -1,0 +1,21 @@
+{
+  "extends": "../../tsconfig.packages.json",
+  "compilerOptions": {
+    "baseUrl": "./"
+  },
+  "references": [
+    {
+      "path": "../base-utils/tsconfig.json"
+    },
+    {
+      "path": "../keyring-utils/tsconfig.json"
+    },
+    {
+      "path": "../eth-keyring-watch/tsconfig.json"
+    },
+    {
+      "path": "../service-address/tsconfig.json"
+    }
+  ],
+  "include": ["../../types", "./src", "test"]
+}

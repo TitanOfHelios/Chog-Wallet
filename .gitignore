@@ -1,0 +1,59 @@
+# node
+npm-debug.log
+yarn-error.log
+node_modules
+package-lock.json
+folder-alias.json
+
+# tarball from `yarn pack`
+*.tgz
+
+# eslint cache
+.eslintcache
+
+.DS_STORE
+.idea
+.vscfavoriterc
+# Build preview message
+preview-build-message.txt
+
+/packages*/*/coverage
+/packages*/*/dist
+/packages*/*/docs
+
+# Android build artifacts generated inside local package modules
+/packages/*/android/.gradle/
+/packages/*/android/.settings/
+/packages/*/android/build/
+
+# yarn v3 (w/o zero-install)
+# See: https://yarnpkg.com/getting-started/qa#which-files-should-be-gitignored
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/sdks
+!.yarn/versions
+
+# typescript
+/packages*/*/*.tsbuildinfo
+
+/scripts/inpage-bridge/dist
+/apps/mobile/perf/generated/
+/apps/mobile/perf/generated-babel-loadables/
+
+# Cursor AI rules (local development only)
+.cursor/
+.claude/*.local.*
+.claude/worktrees
+docs/*
+!docs/mobile-app-log-format.md
+CLAUDE*.local.md
+
+# codex
+.codex
+
+tasks
+.agents
+.turbo-build

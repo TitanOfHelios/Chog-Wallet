@@ -1,0 +1,59 @@
+// Top-level build file where you can add configuration options common to all sub-projects/modules.
+
+buildscript {
+    ext {
+        buildToolsVersion = "35.0.0"
+        minSdkVersion = 26
+        compileSdkVersion = 36
+        targetSdkVersion = 35
+
+        // We use NDK 23 which has both M1 support and is the side-by-side NDK version from AGP.
+        // ndkVersion = "28.2.13676358" // 28 will enable 16kb support by default, but now we use 27 temporarily
+        ndkVersion = "27.3.13750724"
+        // Only using Android Support libraries
+        supportLibVersion = "34.0.0"
+        googlePlayServicesAuthVersion = "20.7.0"
+        kotlinVersion = "2.0.21"
+        webkitVersion = "1.5.0"
+    }
+    repositories {
+        google()
+        mavenCentral()
+        maven { url "https://maven.aliyun.com/repository/public" }
+        maven { url "https://maven.aliyun.com/repository/central" }
+    }
+    dependencies {
+        classpath("com.android.tools.build:gradle")
+        classpath("com.facebook.react:react-native-gradle-plugin")
+        classpath("com.google.gms:google-services:4.4.0")
+        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin")
+    }
+}
+
+apply plugin: "com.facebook.react.rootproject"
+
+// plugins {
+//     id 'com.google.gms.google-services' version '4.4.2' apply false
+// }
+
+allprojects {
+    repositories {
+        mavenCentral()
+        google()  // Google's Maven repository
+        maven { url 'https://www.jitpack.io' }
+    }
+}
+
+configurations.all {
+    resolutionStrategy.eachDependency { DependencyResolveDetails details ->
+        if (details.requested.group == 'com:reactnativecommunity:webview') {
+            // https://github.com/react-native-webview/react-native-webview/issues/2578
+            details.useTarget "1.6.0"
+        }
+    }
+}
+
+// 需要放在最后
+if (project.hasProperty('hashcheck')) {
+    apply from: 'hashcheck.gradle'
+}

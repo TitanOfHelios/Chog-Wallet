@@ -1,0 +1,54 @@
+{
+  "references": [
+    {
+      "path": "./packages/base-utils/tsconfig.build.json"
+    },
+    {
+      "path": "./packages/biz-utils/tsconfig.build.json"
+    },
+    {
+      "path": "./packages/eth-keyring-watch/tsconfig.build.json"
+    },
+    {
+      "path": "./packages/keyring-utils/tsconfig.build.json"
+    },
+    {
+      "path": "./packages/rn-webview-bridge/tsconfig.build.json"
+    },
+    {
+      "path": "./packages/persist-store/tsconfig.build.json"
+    },
+    {
+      "path": "./packages/service-address/tsconfig.build.json"
+    },
+    {
+      "path": "./packages/service-keyring/tsconfig.build.json"
+    },
+    {
+      "path": "./packages/object-multiplex/tsconfig.build.json"
+    },
+    {
+      "path": "./packages/post-message-stream/tsconfig.build.json"
+    },
+    {
+      "path": "./packages/providers/tsconfig.build.json"
+    },
+    {
+      "path": "./packages/eth-keyring-ledger/tsconfig.build.json"
+    },
+    {
+      "path": "./packages/eth-keyring-keystone/tsconfig.build.json"
+    },
+    {
+      "path": "./packages/eth-keyring-onekey/tsconfig.build.json"
+    },
+    {
+      "path": "./packages/eth-keyring-gnosis/tsconfig.build.json"
+    },
+    {
+      "path": "./packages/eth-keyring-trezor/tsconfig.build.json"
+    }
+  ],
+  "files": [],
+  "include": []
+}

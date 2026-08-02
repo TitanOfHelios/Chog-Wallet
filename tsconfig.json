@@ -1,0 +1,53 @@
+{
+  "compilerOptions": {
+    "esModuleInterop": true,
+    "noEmit": true
+  },
+  "references": [
+    {
+      "path": "./packages/base-utils/tsconfig.json"
+    },
+    {
+      "path": "./packages/biz-utils/tsconfig.json"
+    },
+    {
+      "path": "./packages/eth-keyring-watch/tsconfig.json"
+    },
+    {
+      "path": "./packages/keyring-utils/tsconfig.json"
+    },
+    {
+      "path": "./packages/rn-webview-bridge/tsconfig.json"
+    },
+    {
+      "path": "./packages/persist-store/tsconfig.json"
+    },
+    {
+      "path": "./packages/service-address/tsconfig.json"
+    },
+    {
+      "path": "./packages/service-keyring/tsconfig.json"
+    },
+    {
+      "path": "./packages/object-multiplex/tsconfig.json"
+    },
+    {
+      "path": "./packages/post-message-stream/tsconfig.json"
+    },
+    {
+      "path": "./packages/providers/tsconfig.json"
+    },
+    {
+      "path": "./packages/eth-keyring-ledger/tsconfig.json"
+    },
+    {
+      "path": "./packages/eth-keyring-keystone/tsconfig.json"
+    },
+    {
+      "path": "./packages/eth-keyring-gnosis/tsconfig.json"
+    }
+  ],
+  "files": [],
+  "include": ["./types"],
+  "exclude": ["**/*.test.ts"]
+}

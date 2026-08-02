@@ -1,0 +1,463 @@
+/* eslint-disable react-native/no-inline-styles */
+import { RcIconSwapHiddenArrow } from '@/assets/icons/swap';
+import { AppBottomSheetModal } from '@/components';
+import { DEX_WITH_WRAP } from '@/constant/swap';
+import { useTheme2024, useThemeColors } from '@/hooks/theme';
+import { createGetStyles2024 } from '@/utils/styles';
+import RcIconRefreshCC from '@/assets2024/icons/bridge/IconRefreshCC.svg';
+import { getTokenSymbol } from '@/utils/token';
+import { BottomSheetScrollView } from '@gorhom/bottom-sheet';
+import { BottomSheetModalMethods } from '@gorhom/bottom-sheet/src/types';
+import BigNumber from 'bignumber.js';
+import { useSetAtom } from 'jotai';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import { Animated, Easing, TouchableOpacity, View } from 'react-native';
+import { TDexQuoteData, useSwapSettings, useSwapViewDexIdList } from '../hooks';
+import { refreshIdAtom } from '../hooks/atom';
+import { isSwapWrapToken } from '../utils';
+import { QuoteListLoading, QuoteLoading } from './loading';
+import {
+  DexQuoteItem as DexQuoteItemOld,
+  QuoteItemProps as QuoteItemPropsOld,
+} from './QuoteItem';
+import { makeBottomSheetProps } from '@/components2024/GlobalBottomSheetModal/utils-help';
+import { IS_ANDROID } from '@/core/native/utils';
+import { Text } from '@/components/Typography';
+
+interface QuotesProps
+  extends Omit<
+    QuoteItemPropsOld,
+    | 'bestQuoteAmount'
+    | 'bestQuoteGasUsd'
+    | 'name'
+    | 'quote'
+    | 'active'
+    | 'isBestQuote'
+    | 'quoteProviderInfo'
+  > {
+  list?: TDexQuoteData[];
+  activeName?: string;
+  visible: boolean;
+  onClose: () => void;
+}
+
+export const Quotes = ({
+  list,
+  inSufficient,
+  visible: _visible,
+  onClose,
+  ...other
+}: QuotesProps) => {
+  const colors = useThemeColors();
+
+  const { t } = useTranslation();
+  const { sortIncludeGasFee } = useSwapSettings();
+
+  const sortedList = useMemo(
+    () =>
+      [...(list || [])].sort((a, b) => {
+        const getNumber = (quote: typeof a) => {
+          const price = other.receiveToken.price ? other.receiveToken.price : 0;
+          if (inSufficient) {
+            return new BigNumber(quote.data?.toTokenAmount || 0)
+              .div(
+                10 **
+                  (quote.data?.toTokenDecimals || other.receiveToken.decimals),
+              )
+              .times(price);
+          }
+          if (!quote.preExecResult) {
+            return new BigNumber(Number.MIN_SAFE_INTEGER);
+          }
+          const receiveTokenAmount =
+            new BigNumber(quote?.data?.toTokenAmount || 0)
+              .div(
+                10 **
+                  (quote?.data?.toTokenDecimals || other.receiveToken.decimals),
+              )
+              .toString() || 0;
+          if (sortIncludeGasFee) {
+            return new BigNumber(receiveTokenAmount)
+              .times(price)
+              .minus(quote?.preExecResult?.gasUsdValue || 0);
+          }
+
+          return new BigNumber(receiveTokenAmount).times(price);
+        };
+        return getNumber(b).minus(getNumber(a)).toNumber();
+      }),
+    [inSufficient, list, other.receiveToken, sortIncludeGasFee],
+  );
+
+  const [hiddenError, setHiddenError] = useState(true);
+  const [errorQuoteDEXs, setErrorQuoteDEXs] = useState<string[]>([]);
+  const ViewDexIdList = useSwapViewDexIdList();
+
+  const [bestQuoteAmount, bestQuoteGasUsd] = useMemo(() => {
+    const bestQuote = sortedList?.[0];
+    const receiveTokenAmount =
+      new BigNumber(bestQuote?.data?.toTokenAmount || 0)
+        .div(
+          10 **
+            (bestQuote?.data?.toTokenDecimals || other.receiveToken.decimals),
+        )
+        .toString() || '0';
+
+    return [
+      inSufficient
+        ? new BigNumber(bestQuote?.data?.toTokenAmount || 0)
+            .div(
+              10 **
+                (bestQuote?.data?.toTokenDecimals ||
+                  other.receiveToken.decimals),
+            )
+            .toString(10)
+        : receiveTokenAmount,
+      bestQuote?.isDex ? bestQuote.preExecResult?.gasUsdValue || '0' : '0',
+    ];
+  }, [inSufficient, other?.receiveToken, sortedList]);
+
+  const fetchedList = useMemo(() => list?.map(e => e.name) || [], [list]);
+
+  if (isSwapWrapToken(other.payToken.id, other.receiveToken.id, other.chain)) {
+    const dex = sortedList.find(e => e.isDex) as TDexQuoteData | undefined;
+
+    return (
+      <View style={{ paddingHorizontal: 12 }}>
+        {dex ? (
+          <DexQuoteItemOld
+            inSufficient={inSufficient}
+            preExecResult={dex?.preExecResult}
+            quote={dex?.data}
+            name={dex?.name}
+            isBestQuote
+            bestQuoteAmount={`${
+              new BigNumber(dex?.data?.toTokenAmount || 0)
+                .div(
+                  10 **
+                    (dex?.data?.toTokenDecimals || other.receiveToken.decimals),
+                )
+                .toString() || '0'
+            }`}
+            bestQuoteGasUsd={bestQuoteGasUsd}
+            isLoading={dex.loading}
+            quoteProviderInfo={{
+              name: t('page.swap.wrap-contract'),
+              logo: other?.receiveToken?.logo_url,
+            }}
+            onCloseQuoteList={onClose}
+            {...other}
+          />
+        ) : (
+          <QuoteLoading
+            name={t('page.swap.wrap-contract')}
+            logo={other?.receiveToken?.logo_url}
+          />
+        )}
+
+        <Text
+          style={{
+            fontSize: 13,
+            fontWeight: '400',
+            color: colors['neutral-body'],
+            paddingTop: 20,
+          }}>
+          {t('page.swap.directlySwap', {
+            symbol: getTokenSymbol(other.payToken),
+          })}
+        </Text>
+      </View>
+    );
+  }
+  return (
+    <View style={{ paddingHorizontal: 12 }}>
+      <View style={{ gap: 12 }}>
+        {sortedList.map((params, idx) => {
+          const { name, data, isDex } = params;
+          if (!isDex) {
+            return null;
+          }
+          return (
+            <DexQuoteItemOld
+              onErrQuote={setErrorQuoteDEXs}
+              key={name}
+              inSufficient={inSufficient}
+              preExecResult={params.preExecResult}
+              quote={data as unknown as any}
+              name={name}
+              isBestQuote={idx === 0}
+              bestQuoteAmount={`${bestQuoteAmount}`}
+              bestQuoteGasUsd={bestQuoteGasUsd}
+              isLoading={params.loading}
+              quoteProviderInfo={
+                DEX_WITH_WRAP[name as keyof typeof DEX_WITH_WRAP]
+              }
+              onCloseQuoteList={onClose}
+              {...other}
+            />
+          );
+        })}
+        <QuoteListLoading fetchedList={fetchedList} />
+      </View>
+      <View>
+        <TouchableOpacity
+          style={[
+            {
+              width: 'auto',
+              flexDirection: 'row',
+              justifyContent: 'center',
+              alignItems: 'center',
+              marginTop: 24,
+              gap: 4,
+            },
+            errorQuoteDEXs.length === 0 ||
+            errorQuoteDEXs?.length === ViewDexIdList?.length
+              ? { display: 'none' }
+              : { marginBottom: 12 },
+          ]}
+          onPress={() => {
+            setHiddenError(e => !e);
+          }}>
+          <View
+            style={{
+              width: 'auto',
+              flexDirection: 'row',
+              justifyContent: 'center',
+              alignItems: 'center',
+            }}>
+            <Text
+              style={{
+                fontSize: 13,
+                color: colors['neutral-foot'],
+              }}>
+              {t('page.swap.hidden-no-quote-rates', {
+                count: errorQuoteDEXs.length,
+              })}
+            </Text>
+            <RcIconSwapHiddenArrow
+              width={14}
+              height={14}
+              viewBox="0 0 14 14"
+              style={{
+                position: 'relative',
+                top: 2,
+                transform: [{ rotate: hiddenError ? '0deg' : '180deg' }],
+              }}
+            />
+          </View>
+        </TouchableOpacity>
+      </View>
+      <View
+        style={[
+          { gap: 12, overflow: 'hidden' },
+          hiddenError && errorQuoteDEXs?.length !== ViewDexIdList?.length
+            ? {
+                maxHeight: 0,
+                height: 0,
+              }
+            : {},
+          errorQuoteDEXs.length === 0 ? { display: 'none' } : {},
+        ]}>
+        {sortedList.map((params, idx) => {
+          const { name, data, isDex } = params;
+          if (!isDex) {
+            return null;
+          }
+          return (
+            <DexQuoteItemOld
+              key={name}
+              onErrQuote={setErrorQuoteDEXs}
+              onlyShowErrorQuote
+              inSufficient={inSufficient}
+              preExecResult={params.preExecResult}
+              quote={data as unknown as any}
+              name={name}
+              isBestQuote={idx === 0}
+              bestQuoteAmount={`${bestQuoteAmount}`}
+              bestQuoteGasUsd={bestQuoteGasUsd}
+              isLoading={params.loading}
+              quoteProviderInfo={
+                DEX_WITH_WRAP[name as keyof typeof DEX_WITH_WRAP]
+              }
+              onCloseQuoteList={onClose}
+              {...other}
+            />
+          );
+        })}
+      </View>
+    </View>
+  );
+};
+
+export const QuoteList = (props: QuotesProps) => {
+  const { visible, onClose, loading } = props;
+  const bottomRef = useRef<BottomSheetModalMethods>(null);
+  const presentedRef = useRef(false);
+
+  const refresh = useSetAtom(refreshIdAtom);
+
+  const refreshQuote = React.useCallback(() => {
+    refresh(e => e + 1);
+  }, [refresh]);
+
+  const { t } = useTranslation();
+
+  useEffect(() => {
+    if (visible) {
+      if (!presentedRef.current) {
+        presentedRef.current = true;
+        bottomRef.current?.present();
+      }
+    } else if (presentedRef.current) {
+      bottomRef.current?.dismiss();
+    }
+  }, [visible]);
+
+  const handleDismiss = React.useCallback(() => {
+    presentedRef.current = false;
+    onClose();
+  }, [onClose]);
+
+  const {
+    styles,
+    colors2024, // colors
+    isLight,
+  } = useTheme2024({ getStyle });
+
+  const spinValue = useRef(new Animated.Value(0)).current;
+  const spin = spinValue.interpolate({
+    inputRange: [0, 1],
+    outputRange: ['0deg', '360deg'],
+  });
+
+  useEffect(() => {
+    if (loading) {
+      Animated.loop(
+        Animated.timing(spinValue, {
+          toValue: 1,
+          duration: 1600,
+          easing: Easing.linear,
+          useNativeDriver: true,
+        }),
+      ).start();
+    } else {
+      spinValue.resetAnimation();
+    }
+  }, [loading, spinValue]);
+
+  return (
+    <AppBottomSheetModal
+      snapPoints={['78%']}
+      ref={bottomRef}
+      onDismiss={handleDismiss}
+      enableDismissOnClose
+      {...makeBottomSheetProps({
+        colors: colors2024,
+        linearGradientType: isLight ? 'bg0' : 'bg1',
+      })}>
+      <View style={{ flex: 1, position: 'relative' }}>
+        <TouchableOpacity onPress={refreshQuote} style={styles.refreshIconBtn}>
+          <RcIconRefreshCC color={colors2024['neutral-body']} />
+        </TouchableOpacity>
+        <Text style={styles.headerText}>
+          {t('page.bridge.the-following-bridge-route-are-found')}
+        </Text>
+        <Text style={styles.subtitleText}>
+          {t('page.bridge.swap-best-subtitle')}
+        </Text>
+
+        <BottomSheetScrollView style={styles.flex1}>
+          <Quotes {...props} />
+          <View style={{ height: IS_ANDROID ? 40 : 20 }} />
+        </BottomSheetScrollView>
+      </View>
+    </AppBottomSheetModal>
+  );
+};
+
+const getStyle = createGetStyles2024(({ colors2024 }) => ({
+  bottomBg: {
+    backgroundColor: colors2024['neutral-bg-1'],
+  },
+  subtitleText: {
+    fontSize: 14,
+    lineHeight: 18,
+    fontWeight: '400',
+    fontFamily: 'SF Pro Rounded',
+    color: colors2024['neutral-secondary'],
+    textAlign: 'center',
+    marginTop: 8,
+    marginBottom: 10,
+  },
+  refreshIconBtn: {
+    position: 'absolute',
+    top: -2,
+    right: 24,
+  },
+  headerContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingTop: 20,
+    paddingHorizontal: 20,
+    marginBottom: 12,
+    alignSelf: 'stretch',
+    gap: 3,
+  },
+
+  refreshBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+
+  refreshContent: {
+    fontSize: 14,
+    lineHeight: 18,
+    fontWeight: '700',
+    fontFamily: 'SF Pro Rounded',
+    color: colors2024['brand-default'],
+  },
+
+  headerText: {
+    marginTop: 14,
+    fontSize: 20,
+    lineHeight: 24,
+    fontWeight: '800',
+    fontFamily: 'SF Pro Rounded',
+    textAlign: 'center',
+    color: colors2024['neutral-title-1'],
+  },
+  refreshText: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: colors2024['neutral-title-1'],
+    marginLeft: 8,
+  },
+
+  foot: {
+    paddingTop: 16,
+    flexDirection: 'row',
+    paddingBottom: 20,
+    justifyContent: 'center',
+  },
+
+  flex1: {
+    flex: 1,
+  },
+  radioContainer: {
+    margin: 0,
+    padding: 0,
+  },
+
+  floatBottom: {
+    width: '100%',
+    height: 130,
+    paddingTop: 40,
+    position: 'absolute',
+    bottom: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+}));

@@ -1,0 +1,244 @@
+import { AppState, NativeEventSubscription } from 'react-native';
+
+import { DEFAULT_AUTO_LOCK_MINUTES } from '@/constant/autoLock';
+import {
+  getPreferenceSnapshot,
+  setPreferenceSync,
+} from '@/core/serviceApi/preference';
+import { isKeyringUnlockedSnapshot } from '@/core/serviceApi/keyring';
+import { makeEEClass } from './event';
+
+const MILLISECS_PER_MIN = 60 * 1e3;
+const MILLISECS_PER_SEC = 1e3;
+
+/** @warning never set the duration two short to avoid re-lock on unlocking */
+const CHECK_DURATION = __DEV__ ? 1 * MILLISECS_PER_SEC : 3 * MILLISECS_PER_SEC;
+const AUTO_LOCK_SECS = {
+  ERROR_DELTA: __DEV__ ? 3 * MILLISECS_PER_SEC : 5 * MILLISECS_PER_SEC,
+  TIMEOUT_MILLISECS: Math.floor(
+    __DEV__
+      ? 60 * MILLISECS_PER_MIN
+      : DEFAULT_AUTO_LOCK_MINUTES * MILLISECS_PER_MIN,
+  ),
+};
+
+export function isValidAutoLockTime(ms: number) {
+  return ms > 0;
+}
+function calc(ms: number = AUTO_LOCK_SECS.TIMEOUT_MILLISECS) {
+  if (!isValidAutoLockTime(ms)) return -1;
+  return Date.now() + ms;
+}
+
+function calcExpireTimeFromBaseTime(baseTime: number) {
+  const { timeoutMs } = getPersistedAutoLockTimes();
+  return isValidAutoLockTime(timeoutMs) ? baseTime + timeoutMs : -1;
+}
+
+const autoLockTimerRef = {
+  foregroundExpire: calc(),
+  backToForegroundExpire: null as null | number,
+  timer: null as ReturnType<typeof setInterval> | null,
+  subscription: null as NativeEventSubscription | null,
+};
+
+type TimeoutContext = {
+  // unlockExpire: number;
+  reason: 'foreground' | 'back-to-foreground';
+  delayLock: () => void;
+};
+const { EventEmitter: AutoLockEvent } = makeEEClass<{
+  change: (expireTime: number) => void;
+  timeout: (ctx: TimeoutContext) => void;
+  triggerRefresh: () => void;
+}>();
+export const autoLockEvent = new AutoLockEvent();
+
+function setAutoLockExpireTime(expireTime: number) {
+  autoLockTimerRef.foregroundExpire = expireTime;
+  autoLockTimerRef.backToForegroundExpire = null;
+  autoLockEvent.emit('change', expireTime);
+
+  return expireTime;
+}
+
+export function coerceAutoLockTimeout(ms: number) {
+  if (!isValidAutoLockTime(ms)) {
+    return {
+      timeoutMs: -1,
+      minutes: -1,
+    };
+  }
+
+  const ret = {
+    timeoutMs: -1,
+    minutes: parseFloat((ms / MILLISECS_PER_MIN).toFixed(2)),
+  };
+  const secs = Math.floor(Math.floor(ret.minutes * 60));
+  ret.timeoutMs = parseFloat((secs * MILLISECS_PER_SEC).toFixed(0));
+
+  return ret;
+}
+
+export function getPersistedAutoLockTimes() {
+  // enforce zero to default value
+  const minutes =
+    getPreferenceSnapshot('autoLockTime') || DEFAULT_AUTO_LOCK_MINUTES;
+
+  const formatted = coerceAutoLockTimeout(minutes * MILLISECS_PER_MIN);
+
+  return {
+    ...formatted,
+    expireTime: calc(formatted.timeoutMs),
+  };
+}
+
+function normalizeUnlockTime(time: unknown) {
+  return typeof time === 'number' && Number.isFinite(time) && time > 0
+    ? time
+    : 0;
+}
+
+function normalizeUnlockSessionExpireTime(time: unknown) {
+  if (time === -1) return -1;
+  return typeof time === 'number' && Number.isFinite(time) && time > 0
+    ? time
+    : 0;
+}
+
+export function getPersistedUnlockSessionExpireTime() {
+  const expireTime = normalizeUnlockSessionExpireTime(
+    getPreferenceSnapshot('unlockSessionExpireTime'),
+  );
+  if (expireTime) return expireTime;
+
+  const unlockTime = normalizeUnlockTime(
+    getPreferenceSnapshot('lastUnlockTime'),
+  );
+  if (!unlockTime) return 0;
+
+  return calcExpireTimeFromBaseTime(unlockTime);
+}
+
+function canRefreshUnlockSession(now = Date.now()) {
+  const unlockTime = normalizeUnlockTime(
+    getPreferenceSnapshot('lastUnlockTime'),
+  );
+  if (!unlockTime || unlockTime > now) return false;
+  if (isKeyringUnlockedSnapshot()) return true;
+
+  const expireTime = getPersistedUnlockSessionExpireTime();
+  return expireTime === -1 || expireTime > now;
+}
+
+function refreshPersistedUnlockSessionExpireTime(expireTime: number) {
+  if (!canRefreshUnlockSession()) return;
+
+  setPreferenceSync({
+    unlockSessionExpireTime: expireTime,
+  });
+}
+
+export function refreshAutolockTimeout(type?: 'clear') {
+  if (type === 'clear') {
+    return setAutoLockExpireTime(-1);
+  }
+
+  const { expireTime } = getPersistedAutoLockTimes();
+  refreshPersistedUnlockSessionExpireTime(expireTime);
+  return setAutoLockExpireTime(expireTime);
+}
+
+export function uiRefreshTimeout() {
+  autoLockEvent.emit('triggerRefresh');
+}
+
+export function handleUnlock() {
+  console.debug('apiAutoLocks::onUnlock');
+  refreshAutolockTimeout();
+}
+
+export function handleLock() {
+  refreshAutolockTimeout('clear');
+}
+
+const checkExpire = (
+  unlockExpire: number,
+  reason: TimeoutContext['reason'],
+) => {
+  const nowTime = Date.now();
+  if (unlockExpire < 0) return;
+
+  const fromExpireDiff = nowTime - unlockExpire;
+
+  // console.debug(
+  //   'check auto lock:: unlockExpire: %s; fromExpireDiff: %s',
+  //   unlockExpire,
+  //   fromExpireDiff,
+  // );
+  if (fromExpireDiff > -AUTO_LOCK_SECS.ERROR_DELTA) {
+    console.debug('check auto lock:: timeout');
+    const delayLock = () => refreshAutolockTimeout();
+    autoLockEvent.emit('timeout', { reason: reason, delayLock });
+  }
+};
+
+const prevStateRef = {
+  current: AppState.currentState,
+};
+
+export function setupAutoLockChecker() {
+  if (autoLockTimerRef.timer) {
+    clearInterval(autoLockTimerRef.timer);
+    autoLockTimerRef.timer = null;
+  }
+  autoLockTimerRef.timer = setInterval(() => {
+    const unlockExpire = autoLockTimerRef.foregroundExpire;
+    // console.debug(
+    //   '[autoLock] app to foreground unlockExpire, AppState.isAvailable, AppState.currentState',
+    //   unlockExpire,
+    //   AppState.isAvailable,
+    //   AppState.currentState,
+    // );
+    if (!AppState.isAvailable || AppState.currentState === 'active') {
+      checkExpire(unlockExpire, 'foreground');
+    }
+  }, CHECK_DURATION);
+
+  if (autoLockTimerRef.subscription) {
+    const oldSub = autoLockTimerRef.subscription;
+    autoLockTimerRef.subscription?.remove();
+    autoLockTimerRef.subscription = null;
+    console.debug('[autoLock] clear old subscription', oldSub);
+  }
+  autoLockTimerRef.subscription = AppState.addEventListener('change', state => {
+    const prevState = prevStateRef.current;
+    prevStateRef.current = state;
+    if (prevState !== 'active' && state === 'active') {
+      const backToForegroundExpire = autoLockTimerRef.backToForegroundExpire;
+      autoLockTimerRef.backToForegroundExpire = null;
+      if (!backToForegroundExpire) {
+        return;
+      }
+
+      // console.debug('[autoLock] app back to foreground autoLockTimerRef, unlockExpire', autoLockTimerRef, unlockExpire);
+      backToForegroundExpire &&
+        checkExpire(backToForegroundExpire, 'back-to-foreground');
+    } else if (prevState === 'active' && state !== 'active') {
+      console.debug(
+        '[autoLock] app to background autoLockTimerRef',
+        autoLockTimerRef,
+      );
+      const { expireTime, timeoutMs } = getPersistedAutoLockTimes();
+      refreshPersistedUnlockSessionExpireTime(expireTime);
+      console.debug(
+        '[autoLock] app to background expireTime, timeoutMs',
+        expireTime,
+        timeoutMs,
+      );
+      if (expireTime > Date.now()) {
+        autoLockTimerRef.backToForegroundExpire = expireTime;
+      }
+    }
+  });
+}

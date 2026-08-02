@@ -1,0 +1,1438 @@
+import { apisPerps } from '@/core/apis';
+import RcIconDoubleArrowCC from '@/assets2024/icons/common/double-arrow-cc.svg';
+import RcIconApprovalsCC from '@/assets2024/icons/home/IconApprovalsCC.svg';
+import RcIconBridgeCC from '@/assets2024/icons/home/IconBridgeCC.svg';
+import RcIconGasAccountCC from '@/assets2024/icons/home/IconGasAccountCC.svg';
+import IconGift from '@/assets2024/icons/home/IconGift.svg';
+import RcIconHistoryCC from '@/assets2024/icons/home/IconHistoryCC.svg';
+import RcIconPointsCC from '@/assets2024/icons/home/IconPointsCC.svg';
+import RcIconReceiveCC from '@/assets2024/icons/home/IconReceiveCC.svg';
+import RcIconSendCC from '@/assets2024/icons/home/IconSendCC.svg';
+import RcIconSwapCC from '@/assets2024/icons/home/IconSwapCC.svg';
+import RcIconMarketCC from '@/assets2024/icons/home/IconMarketCC.svg';
+import RcIconConvertDustCC from '@/assets2024/icons/home/IconDustCC.svg';
+
+import { RootNames } from '@/constant/layout';
+import { useTheme2024 } from '@/hooks/theme';
+import { useAppLanguage } from '@/hooks/lang';
+import {
+  createGlobalBottomSheetModal2024,
+  removeGlobalBottomSheetModal2024,
+} from '@/components2024/GlobalBottomSheetModal';
+import { fetchTop5TokensForAllAccountsOnce } from '@/components/AccountSwitcher/hooks';
+import { MODAL_NAMES } from '@/components2024/GlobalBottomSheetModal/types';
+import { clearLendingActionPopupState } from '@/screens/Lending/utils/actionPopup';
+import {
+  createGetStyles2024,
+  makeDebugBorder,
+  makeDevOnlyStyle,
+} from '@/utils/styles';
+import { StackActions, useFocusEffect } from '@react-navigation/native';
+import React, { useCallback, useEffect, useMemo, useRef } from 'react';
+import type { ScrollView, ViewProps } from 'react-native';
+import {
+  Dimensions,
+  StyleSheet,
+  useWindowDimensions,
+  View,
+} from 'react-native';
+
+import { Gesture, GestureDetector } from 'react-native-gesture-handler';
+import Animated, {
+  clamp,
+  Extrapolate,
+  interpolate,
+  runOnJS,
+  runOnUI,
+  scrollTo,
+  useAnimatedReaction,
+  useAnimatedRef,
+  useAnimatedStyle,
+  useSharedValue,
+  withTiming,
+} from 'react-native-reanimated';
+
+import { MultiHomeFeatTitle } from '@/constant/newStyle';
+import { currencyServiceApi } from '@/core/serviceApi/currency';
+import { storeApiAccounts, useMyAccounts } from '@/hooks/account';
+import { storeApiAccountsSwitcher } from '@/hooks/accountsSwitcher';
+import { apisHomeTabIndex, useRabbyAppNavigation } from '@/hooks/navigation';
+import addressBalanceStore, {
+  balanceAccountsStore,
+  getSelectedBalanceAddressesSnapshot,
+} from '@/store/balance';
+import { matomoRequestEvent } from '@/utils/analytics';
+import { navigateDeprecated } from '@/utils/navigation';
+import { useTranslation } from 'react-i18next';
+import { useSortAddressList } from '../../Address/useSortAddressList';
+import { BadgeText } from '../components/BadgeText';
+import {
+  forceUpdateApprovalAlertCounts,
+  triggerApprovalAlertCounts,
+  useApprovalAlertTotal,
+} from '../hooks/approvals';
+
+import RcIconLending from '@/assets2024/icons/home/IconLending.svg';
+import RcIconPerps from '@/assets2024/icons/home/IconPerps.svg';
+import { FastTouchable } from '@/components/Perf/FastTouchable';
+import { useRendererDetect } from '@/components/Perf/PerfDetector';
+import {
+  HOME_REFRESH_INTERVAL,
+  ITEM_GRID_GAP,
+  ITEM_LAYOUT_PADDING_HORIZONTAL,
+} from '@/constant/home';
+import { perfEvents } from '@/core/utils/perf';
+import {
+  beginFeatureActivation,
+  markFeatureActivation,
+} from '@/core/utils/featureActivationDiagnostics';
+import {
+  useHomePostStartupReady,
+  useHomeStartupReady,
+} from '@/core/utils/homeStartupReady';
+import { STARTUP_TASKS } from '@/core/utils/startupTaskManifest';
+import { scheduleStartupTask } from '@/core/utils/startupScheduler';
+import { syncTop10History } from '@/databases/hooks/history';
+import { useSubscribePosition } from '@/hooks/perps/usePerpsStore';
+import { useFetchCexInfo } from '@/hooks/useAddrDesc';
+import {
+  checkGasAccountAddressesEligibility,
+  useGasAccountGiftEligibility,
+} from '@/hooks/useGasAccountEligibility';
+import { refreshDayCurve } from '@/store/curve24h';
+import { scene24hBalanceStore } from '@/store/balance24h';
+import { deleteLongTimeCurveCache } from '@/utils/24balanceCurveCache';
+import { deleteLongTime24hBalanceCache } from '@/utils/24hBalanceCache';
+import useTokenList from '@/store/tokens';
+import useProtocol from '@/store/protocols';
+import { colord } from 'colord';
+import { isTabsSwiping } from '../../Address/components/MultiAssets/hooks';
+import { BrowserOrPerpsPosition } from './BrowserOrPerpsPosition';
+import { GasAccountBadge } from '../../GasAccount/components/GasAccountBadge';
+import { apisLending } from '../../Lending/hooks';
+import { HomeCenterArea } from '../components/HomeCenterArea';
+import { HomeDappDrawer } from '../components/HomeDappDrawer';
+import { HomePendingBadge } from '../components/HomePending';
+import { LendingHF } from '../components/LendingHF';
+import { MultiAddressHomeHeader } from '../components/MultiAddressHomeHeader';
+import { PerpsPnl } from '../components/PerpsPnl';
+import { PointsBadge } from '../../Points/components/PointsBadge';
+import {
+  refreshSuccessAndFailList,
+  resetFetchHistoryTxCount,
+  useHomeHistoryCount,
+  useHomePendingTxCount,
+} from '../hooks/history';
+import type { TabsScrollViewProps } from '@/components/customized/react-native-collapsible-tab-view/ScrollView';
+import { TabsScrollView } from '@/components/customized/react-native-collapsible-tab-view/ScrollView';
+import type { RNGHScrollView } from '@/components/customized/reexports';
+import { RNGHRefreshControl } from '@/components/customized/reexports';
+import {
+  getPullThreshold,
+  getScrollContainerPb,
+  homeDrawerAnimateMutable,
+  SCROLLABLE_STATUS,
+  THRESHOLD_PERCENT,
+} from '../hooks/useHomeDrawerAnimate';
+import { useCurrentTabScrollY } from 'react-native-collapsible-tab-view';
+import type { ScrollHandlerProps } from '@/components/customized/react-native-collapsible-tab-view/hooks';
+import { triggerImpact } from '@/utils/common';
+import type { WorkletFunction } from 'react-native-reanimated/lib/typescript/commonTypes';
+import { SharedValue } from 'react-native-reanimated/lib/typescript/commonTypes';
+import { IS_ANDROID, IS_IOS } from '@/core/native/utils';
+import {
+  HOME_TOP_HEADER_SIZES,
+  SHOULD_SHOW_CUSTOM_INDICATOR_WHEN_LOADING,
+} from '@/constant/home';
+import { useInnerDappSelection } from '@/hooks/useInnerDappSelection';
+import { NewTag } from './NewTag';
+import { useHomeFeatureNewTag } from '../hooks/useHomeFeatureNewTag';
+import { useDismissConvertDustBanner } from '../hooks/useConvertDustBanner';
+import { useMemoizedFn } from 'ahooks';
+import { useValueFromSharedValue } from '@/hooks/reanimated';
+import { sleep } from '@/utils/async';
+import { isEqual } from 'lodash';
+import { preloadTransactionHotNavigator } from '@/perfs/preloads';
+import type { Account } from '@/types/account';
+import type { OnRefreshOnJs } from '@/components/customized/ScrollViewLike/RefreshPlaceholderIOS';
+import {
+  isOverPulldownRefreshThreshold,
+  pulldownRefreshSizes,
+  RefreshPlaceholderIOS,
+  setPulldownRefreshStage,
+  useIOSPulldownRefreshStates,
+  usePulldownRefreshStyles,
+} from '@/components/customized/ScrollViewLike/RefreshPlaceholderIOS';
+import { Text } from '@/components/Typography';
+import { withAnimatedTickerRefreshNudge } from '@/components/Animated/RefreshNudgedTickerText';
+
+function couldDoRefresh() {
+  return apisHomeTabIndex.isHomeAtFirstTab();
+}
+
+function cancelStartupTaskHandle(
+  handle: ReturnType<typeof scheduleStartupTask> | undefined,
+) {
+  if (handle && typeof handle === 'object' && 'cancel' in handle) {
+    const maybeCancelable = handle as { cancel?: unknown };
+    if (typeof maybeCancelable.cancel === 'function') {
+      maybeCancelable.cancel();
+    }
+  }
+}
+
+async function warmHomeHistoryAfterStartup() {
+  const top10Addresses = getSelectedBalanceAddressesSnapshot();
+  if (!top10Addresses.length) {
+    return;
+  }
+  await syncTop10History(top10Addresses, false);
+}
+
+async function warmReceiveAddressListAfterStartup() {
+  await Promise.all([
+    storeApiAccounts.fetchAccounts(),
+    fetchTop5TokensForAllAccountsOnce(),
+    preloadTransactionHotNavigator(),
+    import('@/screens/Address/ReceiveAddressListSheet'),
+    import('@/components/AccountSelector/AccountsPanel'),
+  ]);
+}
+
+const OFFSETS = {
+  atBottomThreshold: 2,
+  // homeSwipeThreadhold: 20,
+};
+
+const {
+  isExpanded,
+  translateY,
+  pullPercent,
+  tabsOpacity,
+  scrollViewContentHeight,
+  scrollViewLayoutHeight,
+  swipeUpHintHeight,
+} = homeDrawerAnimateMutable;
+
+function getIsAtBottom(scrollY: number) {
+  'worklet';
+  const contentHeight = scrollViewContentHeight.value;
+  const layoutHeight = scrollViewLayoutHeight.value;
+
+  if (contentHeight <= 0 || layoutHeight <= 0) {
+    return false;
+  }
+
+  const scrollOffset = Math.max(0, contentHeight - layoutHeight);
+  const restScrollOffset = clamp(scrollOffset - scrollY, 0, scrollOffset);
+  return restScrollOffset <= OFFSETS.atBottomThreshold;
+}
+
+const scrHeight = Dimensions.get('screen').height;
+function hasOverThreshold() {
+  'worklet';
+  return translateY.value < getPullThreshold(scrHeight) * -1;
+}
+
+const tabsScrollHandlers = {
+  onContentSizeChange: ((_, height) => {
+    scrollViewContentHeight.value = height;
+  }) as TabsScrollViewProps['onContentSizeChange'] & object,
+  onLayout: (event => {
+    scrollViewLayoutHeight.value = event.nativeEvent.layout.height;
+  }) as TabsScrollViewProps['onLayout'] & object,
+};
+
+const swipeUpViewHandlers = {
+  onLayout: (event => {
+    swipeUpHintHeight.value = event.nativeEvent.layout.height;
+  }) as ViewProps['onLayout'] & object,
+};
+
+const homeGestureConfs = {
+  activeY: Math.min(
+    8,
+    Math.round(Math.floor(getPullThreshold(scrHeight) * 0.1)),
+  ),
+};
+
+const usePulldownRefreshGesture = <T extends ScrollView | RNGHScrollView>({
+  onJsPulldownRefresh: prop_onJsPulldownRefresh,
+}: {
+  onJsPulldownRefresh?: OnRefreshOnJs;
+} = {}) => {
+  const scrollableRef = useAnimatedRef<T>();
+  const scrollY = useCurrentTabScrollY();
+
+  const scrollableStatus = useSharedValue<SCROLLABLE_STATUS>(
+    SCROLLABLE_STATUS.UNLOCKED,
+  );
+
+  const scrollToEnd = useCallback(
+    (toBottom: boolean, animated = true) => {
+      'worklet';
+      if (toBottom) {
+        scrollTo(scrollableRef, 0, 9999, animated);
+      } else {
+        scrollTo(scrollableRef, 0, 0, animated);
+      }
+      scrollableStatus.value = SCROLLABLE_STATUS.UNLOCKED;
+    },
+    [scrollableRef, scrollableStatus],
+  );
+  const { pullDistance, svIsRefreshing, svIsManualRefreshing } =
+    useIOSPulldownRefreshStates();
+
+  const onJsPulldownRefresh = useMemoizedFn(async () => {
+    await prop_onJsPulldownRefresh?.({ svIsManualRefreshing });
+  });
+
+  useEffect(() => {
+    const remove = addressBalanceStore.subscribe((cur, prev) => {
+      if (cur.metaMap === prev.metaMap || isEqual(cur.metaMap, prev.metaMap)) {
+        return;
+      }
+      const top10Addresses = balanceAccountsStore.getState().selectedAddresses;
+      if (!top10Addresses.length) {
+        return;
+      }
+      const isTop10BalanceLoading =
+        addressBalanceStore.getAddressesFlowState(top10Addresses).isAnyLoading;
+
+      if (!isTop10BalanceLoading) {
+        runOnUI(setPulldownRefreshStage)({
+          state: isTop10BalanceLoading ? 'refreshing' : 'finished',
+          indicatorSpaceHeight: pulldownRefreshSizes.homeHeaderHeight,
+          svIsRefreshing,
+          pullDistance,
+          svIsManualRefreshing,
+        });
+      }
+    });
+
+    return () => {
+      remove();
+    };
+  }, [svIsRefreshing, pullDistance, svIsManualRefreshing]);
+
+  useAnimatedReaction(
+    () => translateY.value,
+    translateYValue => {
+      pullPercent.value = (translateYValue / scrHeight) * 100;
+      const percentValue = pullPercent.value;
+      if (percentValue === -100) {
+        isExpanded.value = true;
+        scrollToEnd(true, false);
+      } else if (percentValue === 0) {
+        isExpanded.value = false;
+      }
+
+      tabsOpacity.value = interpolate(
+        percentValue,
+        [-THRESHOLD_PERCENT, -0],
+        [0, 1],
+        Extrapolate.CLAMP,
+      );
+    },
+  );
+
+  const uiOnScrollBack = useCallback<WorkletFunction>(
+    // @ts-expect-error
+    () => {
+      'worklet';
+      scrollToEnd(false, true);
+    },
+    [scrollToEnd],
+  );
+
+  const onScrollHandlers = {
+    onAnimatedScrollBeginDrag: useCallback<
+      ScrollHandlerProps['onAnimatedScrollBeginDrag'] & object
+    >(() => {
+      // // leave here for debug on some android devices
+      // console.debug(
+      //   '[onScrollHandlers] onAnimatedScrollBeginDrag:: event.nativeEvent',
+      //   event.nativeEvent,
+      // );
+    }, []),
+    onScroll: useCallback<ScrollHandlerProps['onScroll'] & object>(event => {
+      // console.debug(
+      //   '[onScrollHandlers] onScroll:: event.nativeEvent',
+      //   event.nativeEvent,
+      // );
+    }, []),
+    onAnimatedScrollEndDrag: useCallback<
+      ScrollHandlerProps['onAnimatedScrollEndDrag'] & object
+    >(event => {
+      // console.debug(
+      //   '[onScrollHandlers] onAnimatedScrollEndDrag:: event.nativeEvent',
+      //   event.nativeEvent,
+      // );
+    }, []),
+  };
+
+  const startValues = useSharedValue({
+    startedAtTop: scrollY.value <= 5,
+    startedAtBottom: false,
+    hasImpactOnPandown: false,
+    hasImpactOnPanup: false,
+  });
+
+  const panGestureRef = useRef(
+    Gesture.Pan()
+      .shouldCancelWhenOutside(false)
+      .activeOffsetY([-homeGestureConfs.activeY, homeGestureConfs.activeY])
+      .maxPointers(1)
+      .onStart(() => {
+        startValues.value.startedAtBottom = getIsAtBottom(scrollY.value);
+        startValues.value.startedAtTop = scrollY.value <= 5;
+      })
+      .onUpdate(event => {
+        panUp: {
+          if (startValues.value.startedAtBottom && event.translationY < 0) {
+            translateY.value = event.translationY;
+            scrollableStatus.value = SCROLLABLE_STATUS.LOCKED;
+          } else {
+            translateY.value = 0;
+            scrollableStatus.value = SCROLLABLE_STATUS.UNLOCKED;
+          }
+
+          if (
+            startValues.value.startedAtBottom &&
+            hasOverThreshold() &&
+            event.translationY < 0
+          ) {
+            if (IS_ANDROID) {
+              scrollToEnd(true, true);
+            }
+            !startValues.value.hasImpactOnPandown && runOnJS(triggerImpact)();
+            startValues.value.hasImpactOnPandown = true;
+          }
+        }
+
+        pullRefresh: {
+          if (
+            SHOULD_SHOW_CUSTOM_INDICATOR_WHEN_LOADING &&
+            startValues.value.startedAtTop &&
+            !svIsRefreshing.value
+          ) {
+            pullDistance.value = Math.max(0, event.translationY);
+            if (isOverPulldownRefreshThreshold(pullDistance.value)) {
+              !startValues.value.hasImpactOnPanup &&
+                runOnJS(triggerImpact)({ __DEV_ONLY__: true });
+              startValues.value.hasImpactOnPanup = true;
+            }
+          }
+        }
+      })
+      .onEnd(() => {
+        panUp: {
+          const hasImpactOnPandown = startValues.value.hasImpactOnPandown;
+
+          if (startValues.value.startedAtBottom && hasOverThreshold()) {
+            translateY.value = withTiming(-scrHeight, undefined, () => {
+              scrollableStatus.value = SCROLLABLE_STATUS.UNLOCKED;
+            });
+            !hasImpactOnPandown && runOnJS(triggerImpact)();
+          } else {
+            translateY.value = withTiming(0, undefined, () => {
+              scrollableStatus.value = SCROLLABLE_STATUS.UNLOCKED;
+            });
+          }
+          startValues.value.startedAtBottom = false;
+          startValues.value.hasImpactOnPandown = false;
+        }
+
+        pullRefresh: {
+          const hasImpactOnPanup = startValues.value.hasImpactOnPanup;
+          if (
+            SHOULD_SHOW_CUSTOM_INDICATOR_WHEN_LOADING &&
+            startValues.value.startedAtTop &&
+            !svIsRefreshing.value
+          ) {
+            if (isOverPulldownRefreshThreshold(pullDistance.value)) {
+              // svIsRefreshing.value = true;
+              setPulldownRefreshStage({
+                state: 'refreshing',
+                indicatorSpaceHeight: pulldownRefreshSizes.homeHeaderHeight,
+                svIsRefreshing,
+                svIsManualRefreshing,
+                pullDistance,
+              });
+              runOnJS(onJsPulldownRefresh)();
+              !hasImpactOnPanup &&
+                runOnJS(triggerImpact)({ __DEV_ONLY__: true });
+            } else {
+              setPulldownRefreshStage({
+                state: 'finished',
+                indicatorSpaceHeight: pulldownRefreshSizes.homeHeaderHeight,
+                svIsRefreshing,
+                svIsManualRefreshing,
+                pullDistance,
+              });
+            }
+            startValues.value.hasImpactOnPanup = false;
+          }
+        }
+      }),
+  );
+
+  const isRefreshing = useValueFromSharedValue(svIsRefreshing);
+
+  return {
+    panGestureRef,
+
+    onScrollHandlers,
+    uiOnScrollBack,
+    scrollableRef,
+
+    isRefreshing,
+    pullDistance,
+    svIsRefreshing,
+    svIsManualRefreshing,
+  };
+};
+
+const getStyle = createGetStyles2024(
+  {
+    reanimatedStyles: {},
+  },
+  ({ colors2024, isLight, safeAreaInsets }) => ({
+    main: {
+      height: '100%',
+      overflow: 'hidden',
+
+      // flex: 1,
+      // ...makeDevOnlyStyle({
+      //   backgroundColor: colors2024['red-light-2'],
+      // }),
+    },
+    scroll: {
+      flex: 1,
+      paddingTop: 0,
+    },
+    scrollContainer: {
+      flexGrow: 1,
+      minHeight: '100%',
+      paddingBottom: getScrollContainerPb(safeAreaInsets.bottom),
+      // ...makeDebugBorder('orange'),
+    },
+    iosAbsIndicatorOffset: {
+      paddingTop: 0,
+    },
+    scrollViewInner: {
+      marginTop: !SHOULD_SHOW_CUSTOM_INDICATOR_WHEN_LOADING
+        ? HOME_TOP_HEADER_SIZES.tabInnerHomeTopOffset
+        : 0,
+      // ...makeDebugBorder('orange'),
+      // ...makeDevOnlyStyle({
+      //   backgroundColor: colors2024['orange-light-2'],
+      // }),
+    },
+    grid: {
+      marginTop: 0,
+      width: '100%',
+      paddingHorizontal: ITEM_LAYOUT_PADDING_HORIZONTAL,
+    },
+    gridItemsWrap: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      borderRadius: 8,
+      rowGap: ITEM_GRID_GAP,
+      columnGap: ITEM_GRID_GAP,
+      justifyContent: 'space-between',
+      alignItems: 'flex-start',
+      width: '100%',
+    },
+
+    gridItem: {
+      backgroundColor: isLight
+        ? colors2024['neutral-bg-1']
+        : colors2024['neutral-bg-2'],
+      width: '48%', // default
+      minWidth: 0,
+      borderRadius: 16,
+      flexShrink: 0,
+      padding: 20,
+      paddingBottom: 16,
+      display: 'flex',
+      alignItems: 'flex-start',
+      justifyContent: 'center',
+      // height: 86,
+      gap: 12,
+      position: 'relative',
+      // ...makeDebugBorder(),
+    },
+    gridText: {
+      color: colors2024['neutral-title-1'],
+      fontWeight: '700',
+      fontSize: 16,
+      lineHeight: 20,
+      textAlign: 'left',
+      fontFamily: 'SF Pro Rounded',
+    },
+    gridTextZh: {
+      fontSize: 15,
+    },
+    titleWithNewTagRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+    },
+    newTagWrapper: {
+      marginLeft: 4,
+    },
+    badgeWrapper: {
+      display: 'flex',
+      flexDirection: 'row',
+      width: '100%',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      // ...makeDebugBorder('purple'),
+    },
+    iconWrapper: {
+      height: 28,
+      width: 28,
+      // backgroundColor: colors2024['brand-light-1'],
+      // borderRadius: 12,
+      // justifyContent: 'center',
+      // alignItems: 'center',
+    },
+    rightBadgeWrapper: {
+      position: 'relative',
+      right: -4,
+      alignSelf: 'flex-start',
+    },
+    badgeStyle: {},
+    pullUpWrapper: {
+      flex: 1,
+      position: 'relative',
+      // ...makeDebugBorder(),
+    },
+    swipeUpHint: {
+      display: 'flex',
+      flexDirection: 'column',
+      justifyContent: 'center',
+      alignItems: 'center',
+      marginTop: 36,
+      // ...makeDebugBorder('purple'),
+    },
+    swipeUpHintText: {
+      marginTop: 4,
+      fontSize: 16,
+      lineHeight: 20,
+      fontWeight: '500',
+      color: colors2024['neutral-secondary'],
+      fontFamily: 'SF Pro Rounded',
+    },
+  }),
+);
+
+type HomeOverviewTriggerUpdate = ReturnType<
+  typeof addressBalanceStore.useAccountsBalanceTrigger
+>['triggerUpdate'];
+
+function HomeOverviewDeferredStartupGate({
+  triggerUpdate,
+}: {
+  triggerUpdate: HomeOverviewTriggerUpdate;
+}) {
+  const startupReady = useHomeStartupReady();
+
+  if (!startupReady) {
+    return null;
+  }
+
+  return (
+    <>
+      <HomeOverviewCriticalStartupEffects triggerUpdate={triggerUpdate} />
+      <HomeOverviewPostStartupGate triggerUpdate={triggerUpdate} />
+    </>
+  );
+}
+
+function HomeOverviewCriticalStartupEffects({
+  triggerUpdate,
+}: {
+  triggerUpdate: HomeOverviewTriggerUpdate;
+}) {
+  const hasTriggeredRef = useRef(false);
+
+  useEffect(() => {
+    if (hasTriggeredRef.current) {
+      return;
+    }
+    hasTriggeredRef.current = true;
+
+    void triggerUpdate({ localOnly: true });
+  }, [triggerUpdate]);
+
+  return null;
+}
+
+function HomeOverviewPostStartupGate({
+  triggerUpdate,
+}: {
+  triggerUpdate: HomeOverviewTriggerUpdate;
+}) {
+  const postStartupReady = useHomePostStartupReady();
+
+  if (!postStartupReady) {
+    return null;
+  }
+
+  return <HomeOverviewPostStartupEffects triggerUpdate={triggerUpdate} />;
+}
+
+// Deliberately outside the startup gates: every ms this waits behind
+// postReady is added to the position card's blank time.
+function HomeOverviewPerpsPositionSubscription() {
+  const { accounts } = useMyAccounts();
+  const sortedAccounts = useSortAddressList(accounts);
+
+  useSubscribePosition(sortedAccounts);
+
+  return null;
+}
+
+function HomeOverviewPostStartupEffects({
+  triggerUpdate,
+}: {
+  triggerUpdate: HomeOverviewTriggerUpdate;
+}) {
+  const isFirstTriggerRef = useRef(true);
+
+  useFetchCexInfo();
+
+  useFocusEffect(
+    useCallback(() => {
+      if (!couldDoRefresh()) {
+        return;
+      }
+      checkGasAccountAddressesEligibility();
+    }, []),
+  );
+
+  useEffect(() => {
+    const timeoutId = setTimeout(() => {
+      deleteLongTimeCurveCache();
+      deleteLongTime24hBalanceCache();
+    }, 0);
+
+    return () => clearTimeout(timeoutId);
+  }, []);
+
+  useEffect(() => {
+    const historyWarmupHandle = scheduleStartupTask(
+      () => warmHomeHistoryAfterStartup(),
+      STARTUP_TASKS.homeHistoryWarmup,
+    );
+    const receiveAddressListWarmupHandle = scheduleStartupTask(
+      () => warmReceiveAddressListAfterStartup(),
+      STARTUP_TASKS.homeReceiveAddressListWarmup,
+    );
+
+    return () => {
+      cancelStartupTaskHandle(historyWarmupHandle);
+      cancelStartupTaskHandle(receiveAddressListWarmupHandle);
+    };
+  }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      refreshSuccessAndFailList();
+    }, []),
+  );
+
+  useFocusEffect(
+    useCallback(() => {
+      resetFetchHistoryTxCount();
+    }, []),
+  );
+
+  useFocusEffect(
+    useCallback(() => {
+      const isFirstTrigger = isFirstTriggerRef.current;
+      const canRefreshOverview = couldDoRefresh();
+
+      if (!isFirstTrigger && !canRefreshOverview) {
+        return;
+      }
+
+      if (isFirstTriggerRef.current) {
+        isFirstTriggerRef.current = false;
+      }
+
+      triggerUpdate(isFirstTrigger || undefined).then(balanceAccounts => {
+        // console.debug('[perf] MultiAddressHome triggerUpdate refreshed:: balanceAccounts', balanceAccounts);
+        const balanceAddresses = Object.keys(balanceAccounts);
+        scene24hBalanceStore.refresh24hAssets({
+          addresses: balanceAddresses.length ? balanceAddresses : undefined,
+          force: isFirstTrigger,
+          reason: 'manual_refresh',
+        });
+        refreshDayCurve({
+          addresses: balanceAddresses.length ? balanceAddresses : undefined,
+          force: isFirstTrigger,
+          reason: 'manual_refresh',
+        });
+      });
+
+      if (!canRefreshOverview) {
+        return;
+      }
+
+      triggerApprovalAlertCounts(HOME_REFRESH_INTERVAL);
+      // // leave here to measure perf impact
+      // isNonPublicProductionEnv && apisLending.fetchLendingData({ persistOnly: true });
+    }, [triggerUpdate]),
+  );
+
+  return null;
+}
+
+function DeferredHomeDappDrawer({
+  onScrollBack,
+}: {
+  onScrollBack: React.ComponentProps<typeof HomeDappDrawer>['onScrollBack'];
+}) {
+  const postStartupReady = useHomePostStartupReady();
+
+  if (!postStartupReady) {
+    return null;
+  }
+
+  return <HomeDappDrawer onScrollBack={onScrollBack} />;
+}
+
+function DeferredHomeMenuBadge({
+  el,
+  badgeStyle,
+}: {
+  el: {
+    key: MultiHomeFeatTitle;
+    title: string;
+    icon: React.FC<import('react-native-svg').SvgProps>;
+    badge?: number;
+    isSuccess?: boolean;
+    showGiftIcon?: boolean;
+  };
+  badgeStyle: React.ComponentProps<typeof BadgeText>['style'];
+}) {
+  const startupReady = useHomePostStartupReady();
+
+  if (!startupReady) {
+    return null;
+  }
+
+  if (el.key === MultiHomeFeatTitle.Perps) {
+    return <PerpsPnl />;
+  }
+
+  if (el.key === MultiHomeFeatTitle.History) {
+    return <HistoryMenuBadge badgeStyle={badgeStyle} />;
+  }
+
+  if (el.key === MultiHomeFeatTitle.Approvals) {
+    return <ApprovalMenuBadge badgeStyle={badgeStyle} />;
+  }
+
+  if (el.key === MultiHomeFeatTitle.Lending) {
+    return <LendingHF />;
+  }
+
+  if (el.key === MultiHomeFeatTitle.GasAccount) {
+    return <GasAccountMenuBadge />;
+  }
+
+  return null;
+}
+
+function HistoryMenuBadge({
+  badgeStyle,
+}: {
+  badgeStyle: React.ComponentProps<typeof BadgeText>['style'];
+}) {
+  const pendingTxCount = useHomePendingTxCount();
+  const historyCount = useHomeHistoryCount();
+
+  if (pendingTxCount > 0) {
+    return <HomePendingBadge number={pendingTxCount} />;
+  }
+
+  const badge = historyCount?.fail || historyCount?.success;
+  return badge && badge > 0 ? (
+    <BadgeText
+      count={badge}
+      isSuccess={!historyCount?.fail}
+      style={[badgeStyle]}
+    />
+  ) : null;
+}
+
+function ApprovalMenuBadge({
+  badgeStyle,
+}: {
+  badgeStyle: React.ComponentProps<typeof BadgeText>['style'];
+}) {
+  const approvalTotal = useApprovalAlertTotal();
+
+  return approvalTotal > 0 ? (
+    <BadgeText count={approvalTotal} style={[badgeStyle]} />
+  ) : null;
+}
+
+function GasAccountMenuBadge() {
+  const isGiftEligible = useGasAccountGiftEligibility();
+
+  return isGiftEligible ? (
+    <IconGift width={24} height={24} />
+  ) : (
+    <GasAccountBadge />
+  );
+}
+
+export const HomeOverview = React.memo(() => {
+  const navigation = useRabbyAppNavigation();
+  const { t } = useTranslation();
+  const { styles, reanimatedStyles, colors2024, isLight } = useTheme2024({
+    getStyle,
+  });
+  const dismissConvertDustBanner = useDismissConvertDustBanner();
+  const receiveSelectingRef = useRef(false);
+  const receiveSelectingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+
+  useEffect(() => {
+    return () => {
+      if (receiveSelectingTimerRef.current) {
+        clearTimeout(receiveSelectingTimerRef.current);
+        receiveSelectingTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  const { width } = useWindowDimensions();
+  const itemWidth =
+    (width - ITEM_LAYOUT_PADDING_HORIZONTAL * 2 - ITEM_GRID_GAP - 2) / 2;
+
+  const MENU_ARR = useMemo(
+    () =>
+      [
+        {
+          key: MultiHomeFeatTitle.Send,
+          title: t('page.home.services.send'),
+          icon: RcIconSendCC,
+        },
+        {
+          key: MultiHomeFeatTitle.Receive,
+          title: t('page.home.services.receive'),
+          icon: RcIconReceiveCC,
+        },
+        {
+          key: MultiHomeFeatTitle.History,
+          title: t('page.home.services.history'),
+          icon: RcIconHistoryCC,
+        },
+        {
+          key: MultiHomeFeatTitle.Approvals,
+          title: t('page.home.services.approvals'),
+          icon: RcIconApprovalsCC,
+        },
+        // __DEV__ && {
+        //   title: MultiHomeFeatTitle.TEST_DAPP,
+        //   icon: RcIconDapps,
+        // },
+        // {
+        //   title: MultiHomeFeatTitle.Ecosystem,
+        //   icon: RcIconEcosystem,
+        // },
+        {
+          key: MultiHomeFeatTitle.Points,
+          title: t('page.rabbyPoints.title'),
+          icon: RcIconPointsCC,
+        },
+      ].filter(Boolean) as {
+        key: MultiHomeFeatTitle;
+        title: string;
+        icon: React.FC<import('react-native-svg').SvgProps>;
+        color?: string;
+        badge?: number;
+        isSuccess?: boolean;
+        showGiftIcon?: boolean;
+      }[],
+    [t],
+  );
+
+  const { triggerUpdate } = addressBalanceStore.useAccountsBalanceTrigger();
+
+  const refreshManualBalance = useCallback(() => {
+    return triggerUpdate(true).then(balanceAccounts => {
+      const balanceAddresses = Object.keys(balanceAccounts);
+      scene24hBalanceStore.refresh24hAssets({
+        addresses: balanceAddresses.length ? balanceAddresses : undefined,
+        force: true,
+        reason: 'manual_refresh',
+      });
+      refreshDayCurve({
+        addresses: balanceAddresses.length ? balanceAddresses : undefined,
+        force: true,
+        reason: 'manual_refresh',
+      });
+    });
+  }, [triggerUpdate]);
+
+  const refreshManualHomeBackgroundData = useCallback(async () => {
+    // update at background
+    forceUpdateApprovalAlertCounts();
+    apisLending.fetchLendingData();
+    const forceRefresh = true;
+    void currencyServiceApi.syncCurrencyList(forceRefresh).catch(error => {
+      console.error('[HomeOverview] refresh currency list failed', error);
+    });
+
+    const top10Addresses = getSelectedBalanceAddressesSnapshot();
+    if (!top10Addresses.length) {
+      return;
+    }
+    syncTop10History(top10Addresses, forceRefresh);
+
+    // refresh token/protocol list
+    useTokenList.getState().batchGetTokenList(top10Addresses, forceRefresh);
+    useProtocol.getState().batchGetProtocols(top10Addresses, forceRefresh);
+  }, []);
+
+  const onRefresh = useCallback(async () => {
+    if (!couldDoRefresh()) {
+      return;
+    }
+
+    perfEvents.emit('HOME_WILL_BE_REFRESHED_MANUALLY');
+    return Promise.all([
+      refreshManualBalance(),
+      checkGasAccountAddressesEligibility(true),
+    ]).finally(refreshManualHomeBackgroundData);
+  }, [refreshManualBalance, refreshManualHomeBackgroundData]);
+
+  // 只有手动刷新需要检查跳跃数字是否和刷新前是否一致
+  const handleManualPulldownRefresh = useCallback(async () => {
+    if (!couldDoRefresh()) {
+      return;
+    }
+
+    perfEvents.emit('HOME_WILL_BE_REFRESHED_MANUALLY');
+    const balanceRefresh = refreshManualBalance();
+    const gasAccountRefresh = checkGasAccountAddressesEligibility(true);
+    const fullRefresh = Promise.all([
+      balanceRefresh,
+      gasAccountRefresh,
+    ]).finally(refreshManualHomeBackgroundData);
+    const safeFullRefresh = fullRefresh.catch(error => {
+      console.error('Refresh failed:', error);
+    });
+
+    withAnimatedTickerRefreshNudge(() =>
+      Promise.race([balanceRefresh, sleep(3000)]),
+    ).catch(error => {
+      console.error('Refresh balance failed:', error);
+    });
+    await Promise.race([safeFullRefresh, sleep(3000)]);
+  }, [refreshManualBalance, refreshManualHomeBackgroundData]);
+
+  // const { toggleUseAllAccountsOnScene } = useSwitchSceneCurrentAccount();
+  const handlePressMarket = useCallback(() => {
+    navigation.navigateDeprecated(RootNames.StackHomeNonTab, {
+      screen: RootNames.Market,
+      params: {},
+    });
+  }, [navigation]);
+
+  const navigateToReceive = useCallback(
+    async (account: Account) => {
+      if (receiveSelectingRef.current) {
+        return;
+      }
+
+      receiveSelectingRef.current = true;
+
+      try {
+        await preloadTransactionHotNavigator();
+      } catch (error) {
+        console.error('preloadTransactionHotNavigator::receive::error', error);
+      }
+
+      navigation.dispatch(
+        StackActions.push(RootNames.StackTransaction, {
+          screen: RootNames.Receive,
+          params: {
+            account,
+          },
+        }),
+      );
+
+      receiveSelectingTimerRef.current = setTimeout(() => {
+        receiveSelectingRef.current = false;
+        receiveSelectingTimerRef.current = null;
+      }, 1000);
+    },
+    [navigation],
+  );
+
+  const handlePressReceive = useCallback(() => {
+    const accounts = storeApiAccounts.getAccounts();
+
+    if (accounts.length === 1) {
+      navigateToReceive(accounts[0]);
+      return;
+    }
+
+    const modalId = createGlobalBottomSheetModal2024({
+      name: MODAL_NAMES.RECEIVE_ADDRESS_LIST,
+      bottomSheetModalProps: {
+        enableContentPanningGesture: true,
+        enablePanDownToClose: true,
+        rootViewType: 'View',
+        linearGradientType: isLight ? 'bg0' : 'bg1',
+      },
+      onSelectAccount: account => {
+        if (!account) {
+          return;
+        }
+        removeGlobalBottomSheetModal2024(modalId);
+        navigateToReceive(account);
+      },
+    });
+  }, [isLight, navigateToReceive]);
+
+  const handleClickMenu = useCallback(
+    (key: MultiHomeFeatTitle) => {
+      if (!apisHomeTabIndex.isHomeAtFirstTab()) {
+        return;
+      }
+      if (isTabsSwiping.value) {
+        return;
+      }
+      switch (key) {
+        case MultiHomeFeatTitle.Send:
+          navigation.dispatch(
+            StackActions.push(RootNames.StackTransaction, {
+              screen: RootNames.Send,
+              params: {},
+            }),
+          );
+          break;
+        case MultiHomeFeatTitle.Receive:
+          handlePressReceive();
+          break;
+        case MultiHomeFeatTitle.Swap:
+          {
+            const cycleId = beginFeatureActivation(
+              'swap',
+              'multi_home_swap_press',
+            );
+            markFeatureActivation('swap', 'navigation-dispatched', {
+              cycleId,
+              reason: 'multi_home_navigation_push',
+            });
+          }
+          navigation.dispatch(
+            StackActions.push(RootNames.StackTransaction, {
+              screen: RootNames.MultiSwapBridge,
+              params: {
+                activeTab: 'swap',
+              },
+            }),
+          );
+
+          break;
+        case MultiHomeFeatTitle.Bridge:
+          {
+            const cycleId = beginFeatureActivation(
+              'bridge',
+              'multi_home_bridge_press',
+            );
+            markFeatureActivation('bridge', 'navigation-dispatched', {
+              cycleId,
+              reason: 'multi_home_navigation_push',
+            });
+          }
+          navigation.dispatch(
+            StackActions.push(RootNames.StackTransaction, {
+              screen: RootNames.MultiSwapBridge,
+              params: {
+                activeTab: 'bridge',
+              },
+            }),
+          );
+          break;
+        case MultiHomeFeatTitle.History:
+          storeApiAccountsSwitcher.toggleUseAllAccountsOnScene(
+            'MultiHistory',
+            true,
+          );
+          navigation.dispatch(
+            StackActions.push(RootNames.StackTransaction, {
+              screen: RootNames.MultiAddressHistory,
+              params: {},
+            }),
+          );
+          break;
+        case MultiHomeFeatTitle.Approvals:
+          navigateDeprecated(RootNames.StackAddress, {
+            screen: RootNames.ApprovalAddressList,
+          });
+          break;
+        case MultiHomeFeatTitle.GasAccount:
+          navigation.dispatch(
+            StackActions.push(RootNames.StackTransaction, {
+              screen: RootNames.GasAccount,
+              params: {},
+            }),
+          );
+          break;
+        case MultiHomeFeatTitle.Market: {
+          handlePressMarket();
+          break;
+        }
+        case MultiHomeFeatTitle.Ecosystem:
+          break;
+        case MultiHomeFeatTitle.Perps:
+          apisPerps.setHasShownPerpsGuidePopup(true);
+          navigation.push(RootNames.StackTransaction, {
+            screen: RootNames.Perps,
+            params: {},
+          });
+          break;
+        case MultiHomeFeatTitle.Lending:
+          clearLendingActionPopupState();
+          navigation.push(RootNames.StackTransaction, {
+            screen: RootNames.Lending,
+            params: {},
+          });
+          break;
+        case MultiHomeFeatTitle.Points:
+          navigation.push(RootNames.StackAddress, {
+            screen: RootNames.Points,
+            params: {},
+          });
+          break;
+        case MultiHomeFeatTitle.ConvertDust:
+          dismissConvertDustBanner();
+          navigation.push(RootNames.StackTransaction, {
+            screen: RootNames.ConvertDust,
+            params: {},
+          });
+          break;
+        default:
+          break;
+      }
+    },
+    [
+      dismissConvertDustBanner,
+      handlePressMarket,
+      handlePressReceive,
+      navigation,
+    ],
+  );
+
+  const generateCustomBadgeIcon = useCallback(
+    (el: {
+      key: MultiHomeFeatTitle;
+      title: string;
+      icon: React.FC<import('react-native-svg').SvgProps>;
+      badge?: number;
+      isSuccess?: boolean;
+      showGiftIcon?: boolean;
+    }) => {
+      return <DeferredHomeMenuBadge el={el} badgeStyle={styles.badgeStyle} />;
+    },
+    [styles.badgeStyle],
+  );
+
+  const {
+    onScrollHandlers,
+    uiOnScrollBack,
+    scrollableRef,
+    panGestureRef,
+
+    isRefreshing,
+    pullDistance,
+    svIsRefreshing,
+    svIsManualRefreshing,
+  } = usePulldownRefreshGesture<RNGHScrollView>({
+    onJsPulldownRefresh: async ctx => {
+      ctx.svIsManualRefreshing.value = true;
+      await handleManualPulldownRefresh();
+    },
+  });
+
+  const pulldownRefreshReturns = usePulldownRefreshStyles({
+    indicatorSpaceHeight: pulldownRefreshSizes.homeHeaderHeight,
+    pullDistanceMaxValue: HOME_TOP_HEADER_SIZES.tabInnerHomeTopOffset,
+    states: { pullDistance, svIsRefreshing, svIsManualRefreshing },
+  });
+
+  const mainStyle = useAnimatedStyle(() => {
+    return {
+      // overflow: 'hidden',
+      transform: [
+        {
+          // translateY: Math.min(HOME_TOP_HEADER_SIZES.scrollableListTopOffset * 2, translateY.value),
+          translateY: Math.min(0, translateY.value),
+        },
+      ],
+    };
+  });
+
+  useRendererDetect({ name: 'MultiAddressHome::HomeOverview' });
+
+  return (
+    <View style={styles.pullUpWrapper}>
+      <HomeOverviewPerpsPositionSubscription />
+      <HomeOverviewDeferredStartupGate triggerUpdate={triggerUpdate} />
+      <Animated.View style={[styles.main, mainStyle]}>
+        <GestureDetector gesture={panGestureRef.current}>
+          <TabsScrollView
+            ref={scrollableRef}
+            showsVerticalScrollIndicator={false}
+            style={[styles.scroll, { flex: undefined }]}
+            contentContainerStyle={[styles.scrollContainer]}
+            bounces={false}
+            overScrollMode={'never'}
+            scrollEventThrottle={16}
+            onContentSizeChange={tabsScrollHandlers.onContentSizeChange}
+            onLayout={tabsScrollHandlers.onLayout}
+            onAnimatedScrollBeginDrag={
+              onScrollHandlers.onAnimatedScrollBeginDrag
+            }
+            onAnimatedScrollEndDrag={onScrollHandlers.onAnimatedScrollEndDrag}
+            onScroll={onScrollHandlers.onScroll}
+            // scrollableEnabled={scrollableEnabled}
+            simultaneousHandlers={[panGestureRef]}
+            {...(!SHOULD_SHOW_CUSTOM_INDICATOR_WHEN_LOADING && {
+              refreshControl: (
+                <RNGHRefreshControl
+                  style={{ paddingHorizontal: 16 }}
+                  refreshing={isRefreshing}
+                  onRefresh={handleManualPulldownRefresh}
+                />
+              ),
+            })}>
+            <RefreshPlaceholderIOS
+              hooksReturn={pulldownRefreshReturns}
+              animatedStyle={pulldownRefreshReturns.refreshPlaceholderStyle}
+              animatedIndicatorStyle={styles.iosAbsIndicatorOffset}
+              __PICK_MANUAL__
+            />
+            <Animated.View style={[styles.scrollViewInner]}>
+              <MultiAddressHomeHeader onRefresh={onRefresh} />
+
+              <HomeCenterArea />
+              <View style={styles.grid}>
+                <View style={styles.gridItemsWrap}>
+                  {MENU_ARR.map((el, index) => {
+                    return (
+                      <HomeMenuItem
+                        key={index}
+                        el={el}
+                        itemWidth={itemWidth}
+                        onPress={handleClickMenu}
+                        renderBadge={generateCustomBadgeIcon}
+                      />
+                    );
+                  })}
+                </View>
+                <BrowserOrPerpsPosition />
+                <View
+                  style={styles.swipeUpHint}
+                  onLayout={swipeUpViewHandlers.onLayout}>
+                  <RcIconDoubleArrowCC
+                    color={colors2024['neutral-secondary']}
+                  />
+                  <Text style={styles.swipeUpHintText}>
+                    {t('page.home.swipeUp.desc')}
+                  </Text>
+                </View>
+              </View>
+            </Animated.View>
+          </TabsScrollView>
+        </GestureDetector>
+      </Animated.View>
+      <DeferredHomeDappDrawer onScrollBack={uiOnScrollBack} />
+    </View>
+  );
+});
+
+type HomeMenuItemProps = {
+  el: {
+    key: MultiHomeFeatTitle;
+    title: string;
+    icon: React.FC<import('react-native-svg').SvgProps>;
+    color?: string;
+    badge?: number;
+    isSuccess?: boolean;
+    showGiftIcon?: boolean;
+  };
+  itemWidth: number;
+  onPress: (key: MultiHomeFeatTitle) => void;
+  renderBadge: (el: HomeMenuItemProps['el']) => React.ReactNode;
+};
+
+const HomeMenuItem: React.FC<HomeMenuItemProps> = ({
+  el,
+  itemWidth,
+  onPress,
+  renderBadge,
+}) => {
+  const { styles, colors2024, isLight } = useTheme2024({
+    getStyle,
+  });
+  const { currentLanguage } = useAppLanguage();
+  const isZhLang = currentLanguage === 'zh-CN' || currentLanguage === 'zh-Hant';
+  const { shouldShowNewTag, markVisited } = useHomeFeatureNewTag(el.key);
+
+  const handlePress = useCallback(() => {
+    console.debug('[perf] touched menu', el.key);
+    requestAnimationFrame(() => {
+      markVisited();
+      onPress(el.key);
+    });
+    matomoRequestEvent({
+      category: 'Click_Services',
+      action: `Click_${el.key}`,
+    });
+  }, [el.key, markVisited, onPress]);
+
+  return (
+    <FastTouchable
+      style={StyleSheet.flatten([styles.gridItem, { width: itemWidth }])}
+      onPress={handlePress}>
+      <View style={styles.badgeWrapper}>
+        <View style={styles.iconWrapper}>
+          <el.icon
+            width={28}
+            height={28}
+            color={
+              el.color ||
+              (isLight ? colors2024['brand-default-icon'] : '#7084FF')
+            }
+          />
+        </View>
+        <View style={styles.rightBadgeWrapper}>{renderBadge(el)}</View>
+      </View>
+      <View style={styles.titleWithNewTagRow}>
+        <Text
+          style={[styles.gridText, isZhLang && styles.gridTextZh]}
+          numberOfLines={1}
+          ellipsizeMode="tail">
+          {el.title}
+        </Text>
+        {shouldShowNewTag ? (
+          <View style={styles.newTagWrapper}>
+            <NewTag />
+          </View>
+        ) : null}
+      </View>
+    </FastTouchable>
+  );
+};

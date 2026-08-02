@@ -1,0 +1,916 @@
+import { useTheme2024 } from '@/hooks/theme';
+import { createGetStyles2024 } from '@/utils/styles';
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
+import { View, TouchableOpacity } from 'react-native';
+import AutoLockView from '@/components/AutoLockView';
+import type { PopupDetailProps } from '../../type';
+import { formatAmountValueKMB } from '@/screens/TokenDetail/util';
+import { TokenAmountInput } from './TokenAmountInput';
+import { calculateHFAfterWithdraw } from '../../utils/hfUtils';
+import {
+  useLendingSummary,
+  usePoolDataProviderContract,
+  useSelectedMarket,
+} from '../../hooks';
+import { isSameAddress } from '@rabby-wallet/base-utils/dist/isomorphic/address';
+import BigNumber from 'bignumber.js';
+import { BottomSheetScrollView } from '@gorhom/bottom-sheet';
+import { buildWithdrawTx, optimizedPath } from '../../poolService';
+import type { DirectSignBtnMethods } from '@/components2024/DirectSignBtn';
+import { DirectSignBtn } from '@/components2024/DirectSignBtn';
+import { useSceneAccountInfo } from '@/hooks/accountsSwitcher';
+import { getERC20Allowance } from '@/core/apis/provider';
+import { approveToken } from '@/core/apis/approvals';
+import { DirectSignGasInfo } from '@/screens/Bridge/components/BridgeShowMore';
+import { last, noop } from 'lodash';
+import { isAccountSupportMiniApproval } from '@/utils/account';
+import type { Tx } from '@rabby-wallet/rabby-api/dist/types';
+import { toast } from '@/components2024/Toast';
+import WithdrawActionOverView from './WithdrawActionOverView';
+import {
+  API_ETH_MOCK_ADDRESS,
+  HF_RISK_CHECKBOX_THRESHOLD,
+  MAX_CLICK_WITHDRAW_HF_THRESHOLD,
+} from '../../utils/constant';
+import RcIconWarningCircleCC from '@/assets2024/icons/common/warning-circle-cc.svg';
+import { CheckBoxRect } from '@/components2024/CheckBox';
+import { useMiniSigner } from '@/hooks/useSigner';
+import { formatTokenAmount } from '@/utils/number';
+import { useTranslation } from 'react-i18next';
+import { transactionHistoryServiceApi } from '@/core/serviceApi/transactionHistory';
+import {
+  CUSTOM_HISTORY_ACTION,
+  CUSTOM_HISTORY_TITLE_TYPE,
+  LendingReportType,
+  LendingSignType,
+} from '@/screens/Transaction/components/type';
+import { useRefreshHistoryId } from '../../hooks';
+import wrapperToken from '../../config/wrapperToken';
+import { calculateMaxWithdrawAmount } from '../../utils/calculateMaxWithdrawAmount';
+import { APP_VERSIONS, INTERNAL_REQUEST_SESSION } from '@/constant';
+import { apiProvider } from '@/core/apis';
+import { Button } from '@/components2024/Button';
+import { MINI_SIGN_ERROR } from '@/components2024/MiniSignV2/state/SignatureManager';
+import { SignatureInstanceProvider } from '@/components2024/MiniSignV2/state/SignatureInstanceContext';
+import { useSignatureStoreOf } from '@/components2024/MiniSignV2/state/useSignatureStore';
+import { CHAINS_ENUM } from '@debank/common';
+import type { ReserveDataHumanized } from '@aave/contract-helpers';
+import { stats } from '@/utils/stats';
+import { isZeroAmount } from '../../utils/number';
+import { Text } from '@/components/Typography';
+import { useZeroLTVBlockingWithdraw } from '../../hooks/useZeroLTVBlockingWithdraw';
+import { PositionTokenSelector } from '../ItemRender/PositionTokenSelector';
+import {
+  getWrappedNativeTokenOptions,
+  isWrappedNativeSelectorReserve,
+  type BasicPositionTokenOption,
+} from '../../utils/positionTokenSelector';
+import {
+  BOTTOM_BUTTON_SINGLE_HEIGHT,
+  BOTTOM_BUTTON_TITLE_STYLE,
+  BOTTOM_BUTTON_TOP_OFFSET,
+  BOTTOM_BUTTON_WITH_ICON_TITLE_STYLE,
+  getBottomButtonBottomOffset,
+} from '@/constant/layout';
+import {
+  getNativeWithdrawApprovalAmount,
+  getNativeWithdrawRequiredAllowance,
+  isNativeWithdrawApprovalRequired,
+} from '../../utils/withdrawApproval';
+import { isUserCancelledError } from '../../utils/error';
+import { ellipsisSymbol } from '../../utils/format';
+
+export const WithdrawActionPopup: React.FC<PopupDetailProps> = ({
+  reserve,
+  userSummary,
+  onClose,
+  source,
+}) => {
+  const { styles, colors2024 } = useTheme2024({ getStyle: getStyles });
+  const [_amount, setAmount] = useState<string | undefined>(undefined);
+  const [activeUnderlyingAsset, setActiveUnderlyingAsset] = useState(
+    reserve.underlyingAsset,
+  );
+  const [isLoading, setIsLoading] = useState(false);
+  const [needApprove, setNeedApprove] = useState(false);
+  const [approveTxs, setApproveTxs] = useState<Tx[]>([]);
+  const [withdrawTxs, setWithdrawTxs] = useState<Tx[]>([]);
+  const [isChecked, setIsChecked] = useState(false);
+  const { refresh } = useRefreshHistoryId();
+  const { t } = useTranslation();
+  const assetsBlockingWithdraw = useZeroLTVBlockingWithdraw();
+
+  const {
+    displayPoolReserves,
+    formattedPoolReservesAndIncentives,
+    getTargetReserve,
+    wrapperPoolReserve,
+  } = useLendingSummary();
+  const { chainEnum, chainInfo, selectedMarketData } = useSelectedMarket();
+  const wethGatewayAddress = selectedMarketData?.addresses.WETH_GATEWAY;
+  const { pools } = usePoolDataProviderContract();
+  const buildTransactionsRequestIdRef = useRef(0);
+  const directSignBtnRef = useRef<DirectSignBtnMethods>(null);
+
+  const resetTokenScopedState = useCallback(() => {
+    buildTransactionsRequestIdRef.current += 1;
+    setAmount(undefined);
+    setNeedApprove(false);
+    setApproveTxs([]);
+    setWithdrawTxs([]);
+    setIsChecked(false);
+    setIsLoading(false);
+  }, []);
+
+  useEffect(() => {
+    resetTokenScopedState();
+    setActiveUnderlyingAsset(reserve.underlyingAsset);
+  }, [reserve.underlyingAsset, resetTokenScopedState]);
+
+  const currentReserve = useMemo(() => {
+    return getTargetReserve(activeUnderlyingAsset) || reserve;
+  }, [activeUnderlyingAsset, getTargetReserve, reserve]);
+
+  const tokenOptions = useMemo(() => {
+    return isWrappedNativeSelectorReserve(currentReserve, chainEnum)
+      ? getWrappedNativeTokenOptions({
+          displayPoolReserves,
+          chainEnum,
+        })
+      : undefined;
+  }, [chainEnum, currentReserve, displayPoolReserves]);
+
+  const handleChangeActiveUnderlyingAsset = useCallback(
+    (underlyingAsset: string) => {
+      if (directSignBtnRef.current?.isAuthInProgress()) {
+        return;
+      }
+      if (isSameAddress(underlyingAsset, activeUnderlyingAsset)) {
+        return;
+      }
+      resetTokenScopedState();
+      setActiveUnderlyingAsset(underlyingAsset);
+    },
+    [activeUnderlyingAsset, resetTokenScopedState],
+  );
+
+  const withdrawAmount = useMemo(() => {
+    if (!userSummary.totalBorrowsUSD || userSummary.totalBorrowsUSD === '0') {
+      return Number(currentReserve.underlyingBalance || '0');
+    }
+    const targetPool = formattedPoolReservesAndIncentives.find(item => {
+      return isSameAddress(currentReserve.underlyingAsset, API_ETH_MOCK_ADDRESS)
+        ? isSameAddress(
+            item.underlyingAsset,
+            wrapperToken?.[currentReserve.chain]?.address,
+          )
+        : isSameAddress(item.underlyingAsset, currentReserve.underlyingAsset);
+    });
+    if (!targetPool) {
+      return 0;
+    }
+    return calculateMaxWithdrawAmount(
+      userSummary,
+      currentReserve,
+      targetPool,
+      MAX_CLICK_WITHDRAW_HF_THRESHOLD,
+    ).toNumber();
+  }, [currentReserve, formattedPoolReservesAndIncentives, userSummary]);
+
+  const amount = useMemo(() => {
+    return _amount === '-1' ? withdrawAmount.toString() : _amount;
+  }, [_amount, withdrawAmount]);
+
+  const isNativeToken = useMemo(() => {
+    return isSameAddress(currentReserve.underlyingAsset, API_ETH_MOCK_ADDRESS);
+  }, [currentReserve.underlyingAsset]);
+
+  const { finalSceneCurrentAccount: currentAccount } = useSceneAccountInfo({
+    forScene: 'Lending',
+  });
+
+  const canShowDirectSubmit = useMemo(
+    () => isAccountSupportMiniApproval(currentAccount?.type || ''),
+    [currentAccount?.type],
+  );
+  const activeTxs = useMemo(
+    () => [...approveTxs, ...withdrawTxs],
+    [approveTxs, withdrawTxs],
+  );
+  const {
+    openDirect,
+    prefetch: prefetchMiniSigner,
+    instance,
+  } = useMiniSigner({
+    account: currentAccount!,
+    chainServerId: activeTxs.length ? activeTxs[0]?.chainId + '' : '',
+    autoResetGasStoreOnChainChange: true,
+  });
+  const { ctx } = useSignatureStoreOf(instance);
+
+  const afterHF = useMemo(() => {
+    if (!amount || isZeroAmount(amount)) {
+      return undefined;
+    }
+    const targetPool = formattedPoolReservesAndIncentives.find(item => {
+      return isSameAddress(currentReserve.underlyingAsset, API_ETH_MOCK_ADDRESS)
+        ? isSameAddress(
+            item.underlyingAsset,
+            wrapperToken?.[currentReserve.chain]?.address,
+          )
+        : isSameAddress(item.underlyingAsset, currentReserve.underlyingAsset);
+    });
+    if (!targetPool) {
+      return undefined;
+    }
+    return calculateHFAfterWithdraw({
+      user: userSummary,
+      userReserve: currentReserve,
+      poolReserve: targetPool,
+      withdrawAmount: amount,
+    }).toString();
+  }, [amount, currentReserve, formattedPoolReservesAndIncentives, userSummary]);
+
+  const isRisky = useMemo(() => {
+    if (!afterHF || Number(afterHF) < 0) {
+      return false;
+    }
+    return Number(afterHF) < HF_RISK_CHECKBOX_THRESHOLD;
+  }, [afterHF]);
+
+  const afterSupply = useMemo(() => {
+    if (!amount || isZeroAmount(amount)) {
+      return undefined;
+    }
+    const balance = BigNumber(currentReserve.underlyingBalance || '0').minus(
+      BigNumber(amount),
+    );
+    const balanceUSD = BigNumber(balance).multipliedBy(
+      BigNumber(currentReserve.reserve.formattedPriceInMarketReferenceCurrency),
+    );
+    return {
+      balance: balance.toString(),
+      balanceUSD: balanceUSD.toString(),
+    };
+  }, [
+    amount,
+    currentReserve.reserve.formattedPriceInMarketReferenceCurrency,
+    currentReserve.underlyingBalance,
+  ]);
+
+  const currentPoolReserve = useMemo(() => {
+    return (
+      isNativeToken
+        ? wrapperPoolReserve
+        : formattedPoolReservesAndIncentives.find(item =>
+            isSameAddress(item.underlyingAsset, currentReserve.underlyingAsset),
+          )
+    ) as ReserveDataHumanized | undefined | null;
+  }, [
+    formattedPoolReservesAndIncentives,
+    isNativeToken,
+    currentReserve.underlyingAsset,
+    wrapperPoolReserve,
+  ]);
+
+  const isZeroLTVWithdrawBlocked = useMemo(() => {
+    if (!assetsBlockingWithdraw.length || !currentPoolReserve?.symbol) {
+      return false;
+    }
+    return !assetsBlockingWithdraw.includes(currentPoolReserve.symbol);
+  }, [assetsBlockingWithdraw, currentPoolReserve?.symbol]);
+
+  const buildTransactions = useCallback(async () => {
+    const requestId = ++buildTransactionsRequestIdRef.current;
+    const isLatestRequest = () =>
+      requestId === buildTransactionsRequestIdRef.current;
+
+    setNeedApprove(false);
+    setApproveTxs([]);
+    setWithdrawTxs([]);
+
+    if (
+      !amount ||
+      isZeroAmount(amount) ||
+      !currentAccount ||
+      isZeroLTVWithdrawBlocked
+    ) {
+      setIsLoading(false);
+      return;
+    }
+    if (!pools) {
+      setIsLoading(false);
+      return;
+    }
+
+    try {
+      setIsLoading(true);
+      if (!chainInfo) {
+        return;
+      }
+
+      const targetPool = currentPoolReserve;
+
+      if (!targetPool?.aTokenAddress) {
+        return;
+      }
+
+      const formattedApproveTxs: Tx[] = [];
+      if (isNativeToken) {
+        if (!wethGatewayAddress || wethGatewayAddress === '0x0') {
+          throw new Error('WETHGateway is not configured for this market');
+        }
+
+        const requiredAllowance = getNativeWithdrawRequiredAllowance({
+          amount,
+          decimals: currentReserve.reserve.decimals,
+        });
+        const allowance = await getERC20Allowance(
+          chainInfo.serverId,
+          targetPool.aTokenAddress,
+          wethGatewayAddress,
+          currentAccount.address,
+          currentAccount,
+        );
+        if (!isLatestRequest()) {
+          return;
+        }
+
+        const actualNeedApprove = isNativeWithdrawApprovalRequired({
+          allowance,
+          requiredAllowance,
+        });
+        setNeedApprove(actualNeedApprove);
+        if (actualNeedApprove) {
+          const approveResult = await approveToken({
+            chainServerId: chainInfo.serverId,
+            id: targetPool.aTokenAddress,
+            spender: wethGatewayAddress,
+            amount: getNativeWithdrawApprovalAmount(requiredAllowance),
+            account: currentAccount,
+            isBuild: true,
+          });
+          if (!isLatestRequest()) {
+            return;
+          }
+
+          const approveTx = {
+            ...approveResult.params[0],
+            from: approveResult.params[0].from || currentAccount.address,
+            value: approveResult.params[0].value ?? '0x0',
+            chainId: approveResult.params[0].chainId || chainInfo.id,
+          } as Tx;
+          formattedApproveTxs.push(approveTx);
+        }
+      }
+
+      const withdrawAmountForTx = _amount === '-1' ? '-1' : amount;
+      const withdrawTx = await buildWithdrawTx({
+        pool: pools.pool,
+        amount: withdrawAmountForTx,
+        address: currentAccount.address,
+        reserve: isNativeToken
+          ? API_ETH_MOCK_ADDRESS
+          : targetPool.underlyingAsset,
+        aTokenAddress: targetPool.aTokenAddress,
+        useOptimizedPath: optimizedPath(selectedMarketData?.chainId),
+      });
+      if (!isLatestRequest()) {
+        return;
+      }
+      if (!withdrawTx) {
+        return;
+      }
+      const txWithOptionalGasLimit = withdrawTx as typeof withdrawTx & {
+        gasLimit?: unknown;
+      };
+      delete txWithOptionalGasLimit.gasLimit;
+      const formattedWithdrawTx = {
+        ...txWithOptionalGasLimit,
+        from: withdrawTx.from || currentAccount.address,
+        value:
+          typeof withdrawTx.value === 'string'
+            ? withdrawTx.value
+            : withdrawTx.value?.toHexString() || '0x0',
+        chainId: chainInfo.id,
+      } as unknown as Tx;
+
+      setApproveTxs(formattedApproveTxs);
+      setWithdrawTxs([formattedWithdrawTx]);
+    } catch (error) {
+      if (!isLatestRequest()) {
+        return;
+      }
+      toast.error('something error');
+      setNeedApprove(false);
+      setApproveTxs([]);
+      setWithdrawTxs([]);
+      console.error('Build transactions error:', error);
+    } finally {
+      if (isLatestRequest()) {
+        setIsLoading(false);
+      }
+    }
+    //currentAccount is not stable
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    _amount,
+    amount,
+    chainInfo,
+    currentAccount?.address,
+    currentPoolReserve,
+    currentReserve.reserve.decimals,
+    isNativeToken,
+    isZeroLTVWithdrawBlocked,
+    pools,
+    selectedMarketData?.chainId,
+    wethGatewayAddress,
+  ]);
+
+  // 执行withdraw交易
+  const handleWithdraw = useCallback(
+    async (forceFullSign?: boolean) => {
+      if (
+        !currentAccount ||
+        !activeTxs.length ||
+        !amount ||
+        isZeroAmount(amount) ||
+        isZeroLTVWithdrawBlocked
+      ) {
+        return;
+      }
+
+      try {
+        setIsLoading(true);
+        if (!activeTxs.length) {
+          toast.info('please retry');
+          throw new Error('no txs');
+        }
+        let results: string[] = [];
+        const signType =
+          canShowDirectSubmit && !forceFullSign
+            ? LendingSignType.Simplified
+            : LendingSignType.Full;
+        if (canShowDirectSubmit && !forceFullSign) {
+          try {
+            results = await openDirect({
+              txs: activeTxs,
+              ga: {
+                customAction: CUSTOM_HISTORY_ACTION.LENDING,
+                customActionTitleType:
+                  CUSTOM_HISTORY_TITLE_TYPE.LENDING_WITHDRAW,
+              },
+            });
+          } catch (error) {
+            if (error === MINI_SIGN_ERROR.USER_CANCELLED) {
+              setAmount(undefined);
+              onClose?.();
+            }
+            if (error === MINI_SIGN_ERROR.PREFETCH_FAILURE) {
+              handleWithdraw(true);
+            }
+            return;
+          }
+        } else {
+          for (const tx of activeTxs) {
+            const result = await apiProvider.sendRequest({
+              data: {
+                method: 'eth_sendTransaction',
+                params: [tx],
+                $ctx: {
+                  ga: {
+                    customAction: CUSTOM_HISTORY_ACTION.LENDING,
+                    customActionTitleType:
+                      CUSTOM_HISTORY_TITLE_TYPE.LENDING_WITHDRAW,
+                  },
+                },
+              },
+              session: INTERNAL_REQUEST_SESSION,
+              account: currentAccount,
+            });
+            results.push(result);
+          }
+        }
+
+        const txId = last(results);
+        if (txId && activeTxs[0]?.chainId) {
+          await transactionHistoryServiceApi.setCustomTxItem(
+            currentAccount.address,
+            activeTxs[0].chainId,
+            txId,
+            { actionType: CUSTOM_HISTORY_TITLE_TYPE.LENDING_WITHDRAW },
+          );
+        }
+
+        const targetPool = formattedPoolReservesAndIncentives.find(item => {
+          return isSameAddress(
+            currentReserve.underlyingAsset,
+            API_ETH_MOCK_ADDRESS,
+          )
+            ? isSameAddress(
+                item.underlyingAsset,
+                wrapperToken?.[currentReserve.chain]?.address,
+              )
+            : isSameAddress(
+                item.underlyingAsset,
+                currentReserve.underlyingAsset,
+              );
+        });
+        const usdValue = targetPool
+          ? new BigNumber(amount || '0')
+              .multipliedBy(
+                BigNumber(
+                  targetPool.formattedPriceInMarketReferenceCurrency || '0',
+                ),
+              )
+              .toString()
+          : '0';
+
+        stats.report('aaveInternalTx', {
+          tx_type: LendingReportType.Withdraw,
+          chain: chainInfo?.serverId || '',
+          tx_id: txId || '',
+          user_addr: currentAccount.address || '',
+          address_type: currentAccount.type || '',
+          usd_value: usdValue,
+          create_at: Date.now(),
+          app_version: APP_VERSIONS.fromNative || '0',
+          signType,
+          ...(source ? { source } : {}),
+        });
+
+        refresh();
+        toast.success(
+          `${t('page.Lending.withdrawDetail.actions')} ${t(
+            'page.Lending.submitted',
+          )}`,
+        );
+        setAmount(undefined);
+        onClose?.();
+      } catch (error) {
+        console.error('Handle withdraw error:', error);
+        if (forceFullSign && isUserCancelledError(error)) {
+          await buildTransactions();
+        }
+      } finally {
+        setIsLoading(false);
+      }
+    },
+    [
+      currentAccount,
+      activeTxs,
+      amount,
+      canShowDirectSubmit,
+      formattedPoolReservesAndIncentives,
+      chainInfo?.serverId,
+      refresh,
+      t,
+      onClose,
+      openDirect,
+      currentReserve.underlyingAsset,
+      currentReserve.chain,
+      source,
+      isZeroLTVWithdrawBlocked,
+      buildTransactions,
+    ],
+  );
+
+  const handleChangeAmount = useCallback(
+    (value: string) => {
+      if (directSignBtnRef.current?.isAuthInProgress()) {
+        return;
+      }
+      const maxSelected = value === '-1';
+      if (maxSelected) {
+        // 提取所有资产
+        if (BigNumber(withdrawAmount).eq(currentReserve.underlyingBalance)) {
+          setAmount('-1');
+        } else {
+          setAmount(withdrawAmount.toString());
+        }
+      } else {
+        setAmount(value);
+      }
+    },
+    [currentReserve.underlyingBalance, withdrawAmount],
+  );
+
+  useEffect(() => {
+    buildTransactions();
+  }, [buildTransactions]);
+
+  useEffect(() => {
+    if (
+      currentAccount?.address &&
+      canShowDirectSubmit &&
+      amount &&
+      !isZeroAmount(amount) &&
+      !isZeroLTVWithdrawBlocked
+    ) {
+      prefetchMiniSigner({
+        txs: activeTxs,
+        synGasHeaderInfo: true,
+      });
+    }
+  }, [
+    canShowDirectSubmit,
+    currentAccount?.address,
+    amount,
+    activeTxs,
+    prefetchMiniSigner,
+    isZeroLTVWithdrawBlocked,
+  ]);
+
+  const actionTitle = needApprove
+    ? t('page.Lending.withdrawDetail.approveAndWithdraw')
+    : t('page.Lending.withdrawDetail.actions');
+  const displaySymbol = useMemo(
+    () => ellipsisSymbol(currentReserve.reserve.symbol),
+    [currentReserve.reserve.symbol],
+  );
+
+  return (
+    <SignatureInstanceProvider instance={instance}>
+      <AutoLockView as="View" style={styles.container}>
+        <Text style={styles.title}>
+          {t('page.Lending.withdrawDetail.actions')}{' '}
+          {currentReserve.reserve.symbol}
+        </Text>
+        <View style={styles.amountHeader}>
+          <Text style={styles.amountHeaderTitle}>
+            {t('page.Lending.popup.amount')}
+          </Text>
+          <Text style={styles.amountValueDescription}>{`${formatTokenAmount(
+            withdrawAmount.toString() || '0',
+          )}${displaySymbol}($${formatAmountValueKMB(
+            BigNumber(withdrawAmount)
+              .multipliedBy(
+                BigNumber(
+                  currentReserve.reserve
+                    .formattedPriceInMarketReferenceCurrency,
+                ),
+              )
+              .toString(),
+          )}) ${t('page.Lending.popup.available')}`}</Text>
+        </View>
+        <TokenAmountInput
+          value={amount}
+          onChange={handleChangeAmount}
+          symbol={displaySymbol}
+          handleClickMaxButton={() => {
+            handleChangeAmount('-1');
+          }}
+          tokenAmount={withdrawAmount}
+          tokenDecimals={currentReserve.reserve.decimals}
+          price={Number(
+            currentReserve.reserve.formattedPriceInMarketReferenceCurrency ||
+              '0',
+          )}
+          style={styles.amountInput}
+          chain={chainEnum || CHAINS_ENUM.ETH}
+          tokenSelectContent={
+            tokenOptions?.length ? (
+              <PositionTokenSelector
+                triggerVariant="pill"
+                activeUnderlyingAsset={activeUnderlyingAsset}
+                options={tokenOptions as BasicPositionTokenOption[]}
+                symbol={displaySymbol}
+                chain={currentReserve.chain}
+                onChange={handleChangeActiveUnderlyingAsset}
+              />
+            ) : undefined
+          }
+        />
+        <BottomSheetScrollView
+          style={styles.bottomSheetScrollView}
+          contentContainerStyle={styles.transactionContainer}>
+          <WithdrawActionOverView
+            reserve={currentReserve}
+            userSummary={userSummary}
+            afterHF={afterHF}
+            amount={amount}
+            afterSupply={afterSupply}
+          />
+
+          {canShowDirectSubmit && !!amount && !isZeroAmount(amount) && (
+            <View style={styles.gasPreContainer}>
+              <DirectSignGasInfo
+                supportDirectSign={true}
+                loading={false}
+                openShowMore={noop}
+                chainServeId={chainInfo?.serverId || ''}
+                textColor={colors2024['neutral-title-1']}
+              />
+            </View>
+          )}
+        </BottomSheetScrollView>
+
+        <View style={styles.buttonContainer}>
+          {isZeroLTVWithdrawBlocked ? (
+            <View style={styles.warningContainer}>
+              <RcIconWarningCircleCC
+                width={15}
+                height={15}
+                color={colors2024['red-default']}
+              />
+              <Text style={styles.warningText}>
+                {t(
+                  'page.Lending.toggleCollateralModal.toggleRiskTexts.zeroLTVWithdrawBlocked',
+                  { assets: assetsBlockingWithdraw.join(', ') },
+                )}
+              </Text>
+            </View>
+          ) : isRisky ? (
+            <>
+              <View style={styles.warningContainer}>
+                <RcIconWarningCircleCC
+                  width={15}
+                  height={15}
+                  color={colors2024['red-default']}
+                />
+                <Text style={styles.warningText}>
+                  {t('page.Lending.risk.withdrawWarning')}
+                </Text>
+              </View>
+              <TouchableOpacity
+                style={styles.checkbox}
+                onPress={() => {
+                  setIsChecked(prev => !prev);
+                }}>
+                <CheckBoxRect size={16} checked={isChecked} />
+                <Text style={styles.checkboxText}>
+                  {t('page.Lending.risk.checkbox')}
+                </Text>
+              </TouchableOpacity>
+            </>
+          ) : null}
+          {canShowDirectSubmit ? (
+            <DirectSignBtn
+              ref={directSignBtnRef}
+              loading={isLoading}
+              loadingType="circle"
+              key={`${currentReserve.underlyingAsset}-${amount}-${needApprove}`}
+              showTextOnLoading
+              wrapperStyle={styles.directSignBtn}
+              authTitle={actionTitle}
+              title={actionTitle}
+              onFinished={() => handleWithdraw()}
+              disabled={
+                !amount ||
+                isZeroAmount(amount) ||
+                !activeTxs.length ||
+                isLoading ||
+                !currentAccount ||
+                !!ctx?.disabledProcess ||
+                isZeroLTVWithdrawBlocked ||
+                (isRisky && !isChecked)
+              }
+              type="aave"
+              height={BOTTOM_BUTTON_SINGLE_HEIGHT}
+              titleStyle={BOTTOM_BUTTON_WITH_ICON_TITLE_STYLE}
+              iconColor={colors2024['neutral-contrast']}
+              syncUnlockTime
+              account={currentAccount}
+              showHardWalletProcess
+            />
+          ) : (
+            <Button
+              type="aave"
+              loadingType="circle"
+              showTextOnLoading
+              containerStyle={styles.fullWidthButton}
+              height={BOTTOM_BUTTON_SINGLE_HEIGHT}
+              titleStyle={BOTTOM_BUTTON_TITLE_STYLE}
+              onPress={() => handleWithdraw()}
+              title={actionTitle}
+              loading={isLoading}
+              disabled={
+                !amount ||
+                isZeroAmount(amount) ||
+                !activeTxs.length ||
+                isLoading ||
+                !currentAccount ||
+                isZeroLTVWithdrawBlocked ||
+                (isRisky && !isChecked)
+              }
+            />
+          )}
+        </View>
+      </AutoLockView>
+    </SignatureInstanceProvider>
+  );
+};
+const getStyles = createGetStyles2024(ctx => ({
+  container: {
+    // paddingHorizontal: 25,
+    height: '100%',
+    position: 'relative',
+    display: 'flex',
+    alignItems: 'center',
+    flexDirection: 'column',
+    paddingHorizontal: 20,
+    backgroundColor: ctx.colors2024['neutral-bg-1'],
+  },
+  amountHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    width: '100%',
+    paddingHorizontal: 4,
+    marginTop: 36,
+  },
+  amountHeaderTitle: {
+    fontSize: 17,
+    lineHeight: 22,
+    fontWeight: '700',
+    color: ctx.colors2024['neutral-title-1'],
+    fontFamily: 'SF Pro Rounded',
+  },
+  amountValueDescription: {
+    fontSize: 14,
+    lineHeight: 18,
+    color: ctx.colors2024['neutral-secondary'],
+    fontFamily: 'SF Pro Rounded',
+  },
+  amountInput: {
+    marginTop: 12,
+  },
+  bottomSheetScrollView: {
+    width: '100%',
+  },
+  transactionContainer: {
+    gap: 12,
+    width: '100%',
+  },
+  gasPreContainer: {
+    paddingHorizontal: 8,
+  },
+  title: {
+    color: ctx.colors2024['neutral-title-1'],
+    fontSize: 20,
+    fontWeight: '900',
+    lineHeight: 24,
+    textAlign: 'center',
+    marginTop: 0,
+    fontFamily: 'SF Pro Rounded',
+  },
+  buttonContainer: {
+    marginTop: 'auto',
+    minHeight:
+      BOTTOM_BUTTON_TOP_OFFSET +
+      BOTTOM_BUTTON_SINGLE_HEIGHT +
+      getBottomButtonBottomOffset(ctx.safeAreaInsets.bottom),
+    paddingTop: BOTTOM_BUTTON_TOP_OFFSET,
+    paddingBottom: getBottomButtonBottomOffset(ctx.safeAreaInsets.bottom),
+    width: '100%',
+    display: 'flex',
+    flexDirection: 'column',
+    backgroundColor: ctx.colors2024['neutral-bg-1'],
+  },
+  directSignBtn: {
+    width: '100%',
+  },
+  checkbox: {
+    display: 'flex',
+    flexDirection: 'row',
+    gap: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 24,
+    marginTop: 12,
+  },
+  checkboxText: {
+    fontSize: 16,
+    lineHeight: 18,
+    fontWeight: '400',
+    fontFamily: 'SF Pro Rounded',
+    color: ctx.colors2024['neutral-foot'],
+  },
+  warningContainer: {
+    flexDirection: 'row',
+    gap: 8,
+    backgroundColor: ctx.colors2024['red-light-1'],
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    borderRadius: 8,
+    marginBottom: 4,
+  },
+  warningText: {
+    fontSize: 14,
+    lineHeight: 18,
+    fontWeight: '500',
+    flex: 1,
+    color: ctx.colors2024['red-default'],
+    fontFamily: 'SF Pro Rounded',
+  },
+  fullWidthButton: {
+    flex: 1,
+    height: BOTTOM_BUTTON_SINGLE_HEIGHT,
+  },
+}));

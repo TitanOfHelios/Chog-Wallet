@@ -1,0 +1,13 @@
+{
+  "extends": "../../tsconfig.packages.json",
+  "compilerOptions": {
+    "resolveJsonModule": true,
+    "baseUrl": "./"
+  },
+  "references": [
+    {
+      "path": "../keyring-utils/tsconfig.json"
+    }
+  ],
+  "include": ["../../types", "./src"]
+}

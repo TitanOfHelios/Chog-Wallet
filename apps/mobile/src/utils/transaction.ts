@@ -1,0 +1,820 @@
+import type { Chain } from '@/constant/chains';
+import { CHAINS_ENUM } from '@/constant/chains';
+import { DEFAULT_GAS_LIMIT_RATIO, MINIMUM_GAS_LIMIT } from '@/constant/gas';
+import { KEYRING_CATEGORY_MAP } from '@rabby-wallet/keyring-utils';
+import { addressUtils } from '@rabby-wallet/base-utils';
+
+import type {
+  ExplainTxResponse,
+  GasLevel,
+  Tx,
+  TxAllHistoryResult,
+  TxDisplayItem,
+  TxHistoryResult,
+  TxPushType,
+} from '@rabby-wallet/rabby-api/dist/types';
+import BigNumber from 'bignumber.js';
+import { isHexString } from 'ethereumjs-util';
+import { ethers } from 'ethers';
+import abi from 'human-standard-token-abi';
+import { hexToString, isHex, stringToHex } from 'web3-utils';
+import { findChain, getChain } from './chain';
+import i18n from './i18n';
+import { isTempoChain } from './tempo';
+import { openExternalUrl } from '@/core/utils/linking';
+import type { Account } from '@/types/account';
+import type { IManageToken } from '@/types/assets';
+import { HistoryItemEntity } from '@/databases/entities/historyItem';
+import type {
+  CustomTxItem,
+  TransactionHistoryItem,
+} from '@/core/services/transactionHistory';
+import { ensureHistoryListItemFromDb } from '@/utils/historyDisplay';
+import {
+  CUSTOM_HISTORY_TITLE_TYPE,
+  type HistoryDisplayItem,
+  HistoryItemCateType,
+  type TokenChangeDataItem,
+} from '@/types/history';
+import i18next from 'i18next';
+import { ellipsisOverflowedText } from './text';
+import { getTokenSymbol } from './token';
+
+const GAS_PRICE_DECIMALS = 18;
+
+const rawAmountToBn = (
+  value: string | number | BigNumber | null | undefined,
+) => {
+  if (BigNumber.isBigNumber(value)) {
+    return value;
+  }
+  return new BigNumber(value || 0);
+};
+
+const pow10 = (decimals: number) => {
+  return new BigNumber(10).pow(Math.max(0, decimals));
+};
+
+const convert18RawToTokenRaw = (
+  rawAmountIn18: BigNumber,
+  tokenDecimals: number,
+) => {
+  if (tokenDecimals === GAS_PRICE_DECIMALS) {
+    return rawAmountIn18;
+  }
+  if (tokenDecimals > GAS_PRICE_DECIMALS) {
+    return rawAmountIn18.times(pow10(tokenDecimals - GAS_PRICE_DECIMALS));
+  }
+  return rawAmountIn18.div(pow10(GAS_PRICE_DECIMALS - tokenDecimals));
+};
+
+export interface ApprovalRes extends Tx {
+  type?: string;
+  address?: string;
+  uiRequestComponent?: string;
+  isSend?: boolean;
+  isSpeedUp?: boolean;
+  isCancel?: boolean;
+  isSwap?: boolean;
+  isGnosis?: boolean;
+  account?: Account;
+  extra?: Record<string, any>;
+  traceId?: string;
+  $ctx?: any;
+  signingTxId?: string;
+  pushType?: TxPushType;
+  lowGasDeadline?: number;
+  reqId?: string;
+  isGasLess?: boolean;
+  isGasAccount?: boolean;
+  logId?: string;
+  sig?: string;
+  $account?: Account;
+}
+
+export const is1559Tx = (tx: Tx) => {
+  if (!('maxFeePerGas' in tx) || !('maxPriorityFeePerGas' in tx)) {
+    return false;
+  }
+  return (
+    isHexString(tx.maxFeePerGas || '') &&
+    isHexString(tx.maxPriorityFeePerGas || '')
+  );
+};
+export const is7702Tx = (tx: ApprovalRes) => {
+  if ('authorizationList' in tx) {
+    if (
+      Array.isArray(tx.authorizationList) &&
+      tx.authorizationList.length > 0
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+};
+
+export const GASPRICE_RANGE = {
+  [CHAINS_ENUM.ETH]: [0, 20000],
+  [CHAINS_ENUM.BOBA]: [0, 20000],
+  [CHAINS_ENUM.OP]: [0, 20000],
+  [CHAINS_ENUM.BASE]: [0, 20000],
+  [CHAINS_ENUM.ZORA]: [0, 20000],
+  [CHAINS_ENUM.ERA]: [0, 20000],
+  [CHAINS_ENUM.KAVA]: [0, 20000],
+  [CHAINS_ENUM.ARBITRUM]: [0, 20000],
+  [CHAINS_ENUM.AURORA]: [0, 20000],
+  [CHAINS_ENUM.BSC]: [0, 20000],
+  [CHAINS_ENUM.AVAX]: [0, 40000],
+  [CHAINS_ENUM.POLYGON]: [0, 100000],
+  [CHAINS_ENUM.FTM]: [0, 100000],
+  [CHAINS_ENUM.GNOSIS]: [0, 500000],
+  [CHAINS_ENUM.OKT]: [0, 50000],
+  [CHAINS_ENUM.HECO]: [0, 100000],
+  [CHAINS_ENUM.CELO]: [0, 100000],
+  [CHAINS_ENUM.MOVR]: [0, 50000],
+  [CHAINS_ENUM.CRO]: [0, 500000],
+  [CHAINS_ENUM.BTT]: [0, 20000000000],
+  [CHAINS_ENUM.METIS]: [0, 50000],
+};
+export const validateGasPriceRange = (tx: Tx) => {
+  const chain = findChain({
+    id: tx.chainId,
+  });
+  if (!chain) {
+    return true;
+  }
+  const range = (GASPRICE_RANGE as any)[chain.enum];
+  if (!range) {
+    return true;
+  }
+  const [min, max] = range;
+  if (Number((tx as Tx).gasPrice || tx.maxFeePerGas) / 1e9 < min) {
+    throw new Error('GasPrice too low');
+  }
+  if (Number((tx as Tx).gasPrice || tx.maxFeePerGas) / 1e9 > max) {
+    throw new Error('GasPrice too high');
+  }
+  return true;
+};
+
+export const convert1559ToLegacy = tx => {
+  return {
+    chainId: tx.chainId,
+    from: tx.from,
+    to: tx.to,
+    value: tx.value,
+    data: tx.data,
+    gas: tx.gas,
+    gasPrice: tx.maxFeePerGas,
+    nonce: tx.nonce,
+  };
+};
+
+export const convertLegacyTo1559 = (tx: Tx) => {
+  return {
+    chainId: tx.chainId,
+    from: tx.from,
+    to: tx.to,
+    value: tx.value,
+    data: tx.data,
+    gas: tx.gas,
+    maxFeePerGas: tx.gasPrice,
+    maxPriorityFeePerGas: tx.gasPrice,
+    nonce: tx.nonce,
+  };
+};
+
+export function getKRCategoryByType(type?: string) {
+  return KEYRING_CATEGORY_MAP[type as any] || null;
+}
+
+// return maxPriorityPrice or maxGasPrice
+export const calcMaxPriorityFee = (
+  gasList: GasLevel[],
+  target: GasLevel,
+  chainId: number,
+  useMaxFee: boolean,
+) => {
+  if (target.priority_price !== null && target.priority_price !== undefined) {
+    if (target.priority_price > target.price) {
+      return target.price;
+    }
+    return target.priority_price;
+  }
+  return target.price;
+};
+
+export function makeTransactionId(
+  fromAddr: string,
+  nonce: number | string,
+  chainEnum: string,
+) {
+  if (typeof nonce === 'number') {
+    nonce = `0x${nonce.toString(16)}`;
+  } else if (typeof nonce === 'string') {
+    nonce = nonce.startsWith('0x') ? nonce : `0x${nonce}`;
+  }
+  return `${fromAddr}_${nonce}_${chainEnum}`;
+}
+
+const hstInterface = new ethers.utils.Interface(abi);
+
+export function getTokenData(data: string) {
+  try {
+    return hstInterface.parseTransaction({ data });
+  } catch (error) {
+    return undefined;
+  }
+}
+
+export function getTokenAddressParam(
+  tokenData: ethers.utils.TransactionDescription,
+): string {
+  const value = tokenData?.args?._to || tokenData?.args?.[0];
+  return value?.toString().toLowerCase();
+}
+
+export function calcTokenValue(value: string, decimals: number) {
+  const multiplier = Math.pow(10, Number(decimals || 0));
+  return new BigNumber(String(value)).times(multiplier);
+}
+
+export function getCustomTxParamsData(
+  data: string,
+  {
+    customPermissionAmount,
+    decimals,
+  }: { customPermissionAmount: string; decimals: number },
+) {
+  const methodId = data.substring(0, 10);
+  if (methodId === '0x39509351') {
+    // increaseAllowance
+    const iface = new ethers.utils.Interface([
+      {
+        inputs: [
+          { internalType: 'address', name: 'spender', type: 'address' },
+          { internalType: 'uint256', name: 'increment', type: 'uint256' },
+        ],
+        name: 'increaseAllowance',
+        outputs: [{ internalType: 'bool', name: '', type: 'bool' }],
+        stateMutability: 'nonpayable',
+        type: 'function',
+      },
+    ]);
+    const [spender] = iface.decodeFunctionData('increaseAllowance', data);
+    const customPermissionValue = calcTokenValue(
+      customPermissionAmount,
+      decimals,
+    );
+    const calldata = iface.encodeFunctionData('increaseAllowance', [
+      spender,
+      customPermissionValue.toFixed(),
+    ]);
+    return calldata;
+  } else if (methodId === '0x87517c45') {
+    /**
+     * Approves the spender to use up to amount of the specified token up until the expiration
+     * https://arbiscan.io/address/0x000000000022D473030F116dDEE9F6B43aC78BA3#writeContract
+     */
+    const iface = new ethers.utils.Interface([
+      {
+        inputs: [
+          { internalType: 'address', name: 'token', type: 'address' },
+          { internalType: 'address', name: 'spender', type: 'address' },
+          { internalType: 'uint160', name: 'amount', type: 'uint160' },
+          { internalType: 'uint48', name: 'expiration', type: 'uint48' },
+        ],
+        name: 'approve',
+        outputs: [],
+        stateMutability: 'nonpayable',
+        type: 'function',
+      },
+    ]);
+    const [token, spender, , expiration] = iface.decodeFunctionData(
+      'approve',
+      data,
+    );
+    const customPermissionValue = calcTokenValue(
+      customPermissionAmount,
+      decimals,
+    );
+
+    if (customPermissionValue.toString(16).length > 40) {
+      throw new Error('Custom value is larger than uint160');
+    }
+
+    const calldata = iface.encodeFunctionData('approve', [
+      token,
+      spender,
+      customPermissionValue.toFixed(),
+      expiration,
+    ]);
+    return calldata;
+  } else {
+    const tokenData = getTokenData(data);
+
+    if (!tokenData) {
+      throw new Error('Invalid data');
+    }
+    let spender = getTokenAddressParam(tokenData);
+    if (spender.startsWith('0x')) {
+      spender = spender.substring(2);
+    }
+    const separator = new RegExp(spender, 'i');
+    const [signature, tokenValue] = data.split(separator);
+
+    if (!signature || !tokenValue) {
+      throw new Error('Invalid data');
+    }
+
+    let customPermissionValue = calcTokenValue(
+      customPermissionAmount,
+      decimals,
+    ).toString(16);
+
+    if (customPermissionValue.length > 64) {
+      throw new Error('Custom value is larger than u256');
+    }
+
+    customPermissionValue = customPermissionValue.padStart(64, '0');
+    const customTxParamsData = `${signature}${spender}${customPermissionValue}`;
+    return customTxParamsData;
+  }
+}
+
+export function varyTxSignType(txDetail: ExplainTxResponse | null) {
+  let isNFT = false;
+  let isToken = false;
+  let gaCategory: 'Security' | 'Send' = 'Send';
+  let gaAction:
+    | 'signTx'
+    | 'signDeclineTokenApproval'
+    | 'signDeclineNFTApproval'
+    | 'signDeclineTokenAndNFTApproval' = 'signTx';
+
+  if (
+    txDetail?.type_deploy_contract ||
+    txDetail?.type_cancel_tx ||
+    txDetail?.type_call
+  ) {
+    // nothing to do
+  }
+  if (
+    txDetail?.type_cancel_token_approval ||
+    txDetail?.type_cancel_single_nft_approval ||
+    txDetail?.type_cancel_nft_collection_approval
+  ) {
+    gaCategory = 'Security';
+  } else {
+    gaCategory = 'Send';
+  }
+
+  if (
+    txDetail?.type_send ||
+    txDetail?.type_cancel_token_approval ||
+    txDetail?.type_token_approval
+  ) {
+    isToken = true;
+  }
+
+  if (
+    txDetail?.type_cancel_single_nft_approval ||
+    txDetail?.type_cancel_nft_collection_approval ||
+    txDetail?.type_single_nft_approval ||
+    txDetail?.type_nft_collection_approval ||
+    txDetail?.type_nft_send
+  ) {
+    isNFT = true;
+  }
+
+  if (gaCategory === 'Security') {
+    if (isToken && !isNFT) {
+      gaAction = 'signDeclineTokenApproval';
+    } else if (!isToken && isNFT) {
+      gaAction = 'signDeclineNFTApproval';
+    } else if (isToken && isNFT) {
+      gaAction = 'signDeclineTokenAndNFTApproval';
+    }
+  }
+
+  return {
+    gaCategory,
+    gaAction,
+    isNFT,
+    isToken,
+  };
+}
+
+/**
+ * @description accept input data as hex or string, and return the formatted result
+ */
+export function formatTxInputDataOnERC20(maybeHex: string) {
+  const result = {
+    withInputData: false,
+    currentIsHex: false,
+    currentData: '',
+    hexData: '',
+    utf8Data: '',
+  };
+
+  if (!maybeHex) {
+    return result;
+  }
+
+  result.currentIsHex = maybeHex.startsWith('0x') && isHex(maybeHex);
+
+  if (result.currentIsHex) {
+    try {
+      result.currentData = hexToString(maybeHex);
+      result.withInputData = true;
+      result.hexData = maybeHex;
+      result.utf8Data = result.currentData;
+    } catch (err) {
+      result.currentData = '';
+    }
+  } else {
+    result.currentData = maybeHex;
+    result.hexData = stringToHex(maybeHex);
+    result.utf8Data = maybeHex;
+    result.withInputData = true;
+  }
+
+  return result;
+}
+
+function formatNumberArg(arg: string | number, opt = {} as BigNumber.Format) {
+  const bn = new BigNumber(arg);
+  const format = {
+    prefix: '',
+    decimalSeparator: '.',
+    groupSeparator: '',
+    groupSize: 3,
+    secondaryGroupSize: 0,
+    fractionGroupSeparator: ' ',
+    fractionGroupSize: 0,
+    suffix: '',
+    ...opt,
+  };
+
+  return bn.toFormat(0, format);
+}
+
+export function formatTxExplainAbiData(abi?: ExplainTxResponse['abi'] | null) {
+  return [
+    abi?.func,
+    '(',
+    (abi?.params || [])
+      ?.map((argValue, idx) => {
+        const argValueText =
+          typeof argValue === 'number' ? formatNumberArg(argValue) : argValue;
+        return `arg${idx}=${argValueText}`;
+      })
+      .join(', '),
+    ')',
+  ].join('');
+}
+
+export const checkGasAndNonce = ({
+  recommendGasLimitRatio,
+  recommendGasLimit,
+  recommendNonce,
+  tx,
+  gasLimit,
+  nonce,
+  isCancel,
+  gasExplainResponse,
+  isSpeedUp,
+  isGnosisAccount,
+  nativeTokenBalance,
+  gasTokenDecimals = GAS_PRICE_DECIMALS,
+  gasTokenId,
+  tempoPreferredFeeTokenId,
+  checkTxValueInBalance = true,
+}: {
+  recommendGasLimitRatio: number;
+  nativeTokenBalance: string;
+  recommendGasLimit: number | string | BigNumber;
+  recommendNonce: number | string | BigNumber;
+  tx: Tx;
+  gasLimit: number | string | BigNumber;
+  nonce: number | string | BigNumber;
+  gasExplainResponse: {
+    isExplainingGas?: boolean;
+    gasCostUsd: BigNumber;
+    gasCostAmount: BigNumber;
+    maxGasCostAmount: BigNumber;
+    gasCostRawAmount?: BigNumber;
+    maxGasCostRawAmount?: BigNumber;
+  };
+  isCancel: boolean;
+  isSpeedUp: boolean;
+  isGnosisAccount: boolean;
+  gasTokenDecimals?: number;
+  gasTokenId?: string;
+  tempoPreferredFeeTokenId?: string;
+  checkTxValueInBalance?: boolean;
+}) => {
+  const errors: {
+    code: number;
+    msg: string;
+    level?: 'warn' | 'danger' | 'forbidden';
+  }[] = [];
+  if (!isGnosisAccount && new BigNumber(gasLimit).lt(MINIMUM_GAS_LIMIT)) {
+    errors.push({
+      code: 3006,
+      msg: i18n.t('page.signTx.gasLimitNotEnough'),
+      level: 'forbidden',
+    });
+  }
+  if (
+    !isGnosisAccount &&
+    new BigNumber(gasLimit).lt(
+      new BigNumber(recommendGasLimit).times(recommendGasLimitRatio),
+    ) &&
+    new BigNumber(gasLimit).gte(21000)
+  ) {
+    if (recommendGasLimitRatio === DEFAULT_GAS_LIMIT_RATIO) {
+      const realRatio = new BigNumber(gasLimit).div(recommendGasLimit);
+      if (realRatio.lt(DEFAULT_GAS_LIMIT_RATIO) && realRatio.gt(1)) {
+        errors.push({
+          code: 3004,
+          msg: i18n.t('page.signTx.gasLimitLessThanExpect'),
+          level: 'warn',
+        });
+      } else if (realRatio.lt(1)) {
+        errors.push({
+          code: 3005,
+          msg: i18n.t('page.signTx.gasLimitLessThanGasUsed'),
+          level: 'danger',
+        });
+      }
+    } else {
+      if (new BigNumber(gasLimit).lt(recommendGasLimit)) {
+        errors.push({
+          code: 3004,
+          msg: i18n.t('page.signTx.gasLimitLessThanExpect'),
+          level: 'warn',
+        });
+      }
+    }
+  }
+  const balanceRawAmount = rawAmountToBn(nativeTokenBalance || 0);
+  const sendNativeTokenRawAmount = checkTxValueInBalance
+    ? convert18RawToTokenRaw(rawAmountToBn(tx.value || 0), gasTokenDecimals)
+    : new BigNumber(0);
+  const maxGasCostRawAmount =
+    gasExplainResponse.maxGasCostRawAmount ||
+    rawAmountToBn(gasExplainResponse.maxGasCostAmount).times(
+      pow10(gasTokenDecimals),
+    );
+  const chain = findChain({
+    id: tx.chainId,
+  });
+  const txFeeToken = (tx as Tx & { feeToken?: unknown }).feeToken;
+  const tempoFeeToken =
+    tempoPreferredFeeTokenId ||
+    (typeof txFeeToken === 'string' ? txFeeToken : '');
+  const tempoFeeTokenBalanceInsufficient =
+    !!chain &&
+    isTempoChain(chain.serverId) &&
+    !!tempoFeeToken &&
+    !!gasTokenId &&
+    tempoFeeToken.toLowerCase() !== gasTokenId.toLowerCase();
+
+  if (
+    !isGnosisAccount &&
+    (tempoFeeTokenBalanceInsufficient ||
+      maxGasCostRawAmount
+        .plus(sendNativeTokenRawAmount)
+        .isGreaterThan(balanceRawAmount))
+  ) {
+    errors.push({
+      code: 3001,
+      msg: i18n.t('page.signTx.nativeTokenNotEngouthForGas'),
+      level: 'forbidden',
+    });
+  }
+  if (new BigNumber(nonce).lt(recommendNonce) && !(isCancel || isSpeedUp)) {
+    errors.push({
+      code: 3003,
+      msg: i18n.t('page.signTx.nonceLowerThanExpect', [
+        new BigNumber(recommendNonce).toString(),
+      ] as any) as string,
+    });
+  }
+  return errors;
+};
+
+export function openTxExternalUrl(input: {
+  chain?: string | Chain | null;
+  txHash?: string;
+  address?: string;
+}) {
+  const result = {
+    canOpen: false,
+    openPromise: null as ReturnType<typeof openExternalUrl> | null,
+  };
+  const { chain, txHash, address } = input;
+  if (!chain) {
+    return result;
+  }
+
+  const chainItem = typeof chain === 'string' ? getChain(chain) : chain;
+  if (!chainItem) {
+    return result;
+  }
+
+  result.canOpen = !!chainItem?.scanLink;
+
+  if (!result.canOpen) {
+    return result;
+  }
+
+  if (txHash) {
+    result.openPromise = openExternalUrl(
+      addressUtils.getTxScanLink(chainItem?.scanLink, txHash),
+    );
+  } else if (address) {
+    result.openPromise = openExternalUrl(
+      addressUtils.getAddressScanLink(chainItem?.scanLink, address),
+    );
+  }
+
+  return result;
+}
+
+export function txResultToDisplayTxItems(
+  res: TxHistoryResult | TxAllHistoryResult,
+) {
+  const { cate_dict, project_dict, history_list } = res;
+  const tokenDict =
+    (res as TxAllHistoryResult).token_uuid_dict ||
+    (res as TxHistoryResult).token_dict;
+
+  const displayList: TxDisplayItem[] = history_list
+    .map(item => ({
+      ...item,
+      projectDict: project_dict,
+      cateDict: cate_dict,
+      tokenDict: tokenDict,
+    }))
+    .sort((v1, v2) => v2.time_at - v1.time_at);
+
+  return displayList;
+}
+
+export function txResultToToHistoryDisplayItem(input: {
+  address: string;
+  res: TxHistoryResult | TxAllHistoryResult;
+  pinedQueue: IManageToken[];
+  customTxItemsMap: Record<string, CustomTxItem>;
+  transactions: readonly TransactionHistoryItem[];
+}) {
+  const { address, res, pinedQueue, customTxItemsMap, transactions } = input;
+  const { cate_dict, project_dict: projectDict, history_list } = res;
+  const tokenDict =
+    (res as TxAllHistoryResult).token_uuid_dict ||
+    (res as TxHistoryResult).token_dict;
+
+  // const pinedQueue = preferenceService.getPinToken();
+  //     const customTxItemsMap = transactionHistoryService.getCustomTxItemMap();
+
+  const historyItems = history_list
+    .filter(i => Boolean(i.tx))
+    .map(raw => {
+      const customKey = `${address.toLowerCase()}-${raw.chain}-${raw.id}`;
+      const item = new HistoryItemEntity();
+      HistoryItemEntity.fillEntity(
+        item,
+        address,
+        raw,
+        tokenDict,
+        projectDict,
+        pinedQueue,
+        customTxItemsMap[customKey] || undefined,
+        transactions,
+      );
+      return ensureHistoryListItemFromDb(item);
+    });
+
+  return historyItems;
+}
+
+export function prepareTxHistoryDisplayUIData(data: HistoryDisplayItem) {
+  const formatType: HistoryItemCateType = (() => {
+    if (data.historyType === HistoryItemCateType.Swap) {
+      if (
+        data.receives?.[0]?.token?.is_core &&
+        data.sends?.[0]?.token?.is_core
+      ) {
+        return HistoryItemCateType.Swap;
+      } else {
+        return HistoryItemCateType.UnKnown;
+      }
+    }
+    return data.historyType;
+  })();
+
+  const tokenApproveData = (() => {
+    const res: TokenChangeDataItem[] = [];
+
+    if (!data.token_approve?.token_id) {
+      return res;
+    }
+
+    const tokenId = data.token_approve?.token_id || '';
+    const token = data.token_approve?.token;
+    res.push({
+      amount: data.token_approve?.value!,
+      token,
+      token_id: tokenId,
+      type: 'approve',
+    });
+
+    return res;
+  })();
+
+  const formatTitle = (() => {
+    if (data.historyCustomType) {
+      switch (data.historyCustomType) {
+        case CUSTOM_HISTORY_TITLE_TYPE.LENDING_SUPPLY:
+          return i18next.t('page.transactions.itemTitle.LendingSupply');
+        case CUSTOM_HISTORY_TITLE_TYPE.LENDING_WITHDRAW:
+          return i18next.t('page.transactions.itemTitle.LendingWithdraw');
+        case CUSTOM_HISTORY_TITLE_TYPE.LENDING_BORROW:
+          return i18next.t('page.transactions.itemTitle.LendingBorrow');
+        case CUSTOM_HISTORY_TITLE_TYPE.LENDING_REPAY:
+          return i18next.t('page.transactions.itemTitle.LendingRepay');
+        case CUSTOM_HISTORY_TITLE_TYPE.LENDING_ON_COLLATERAL:
+          return i18next.t('page.transactions.itemTitle.LendingOnCollateral');
+        case CUSTOM_HISTORY_TITLE_TYPE.LENDING_OFF_COLLATERAL:
+          return i18next.t('page.transactions.itemTitle.LendingOffCollateral');
+        case CUSTOM_HISTORY_TITLE_TYPE.LENDING_MANAGE_EMODE:
+          return i18next.t('page.transactions.itemTitle.LendingManageEMode');
+        case CUSTOM_HISTORY_TITLE_TYPE.LENDING_MANAGE_EMODE_DISABLE:
+          return i18next.t(
+            'page.transactions.itemTitle.LendingManageEModeDisable',
+          );
+        case CUSTOM_HISTORY_TITLE_TYPE.LENDING_DEBT_SWAP:
+          return i18next.t('page.transactions.itemTitle.LendingDebtSwap');
+        case CUSTOM_HISTORY_TITLE_TYPE.LENDING_REPAY_WITH_COLLATERAL:
+          return i18next.t(
+            'page.transactions.itemTitle.LendingRepayWithCollateral',
+          );
+      }
+    }
+
+    switch (formatType) {
+      case HistoryItemCateType.GAS_DEPOSIT:
+        return i18next.t('page.transactions.itemTitle.DepositedGas');
+      case HistoryItemCateType.GAS_RECEIVED:
+        return i18next.t('page.transactions.itemTitle.ReceivedGas');
+
+      case HistoryItemCateType.GAS_WITHDRAW:
+        return i18next.t('page.transactions.itemTitle.WithdrawnGas');
+
+      case HistoryItemCateType.Swap:
+        return i18next.t('page.transactions.itemTitle.Swap');
+
+      case HistoryItemCateType.Send:
+        return i18next.t('page.transactions.itemTitle.Send');
+      case HistoryItemCateType.Recieve:
+        return i18next.t('page.transactions.itemTitle.Recieve');
+      case HistoryItemCateType.Bridge:
+        return i18next.t('page.transactions.itemTitle.Bridge');
+
+      case HistoryItemCateType.Approve:
+        return (
+          i18next.t('page.transactions.itemTitle.Approve') +
+          ' ' +
+          ellipsisOverflowedText(getTokenSymbol(tokenApproveData[0]?.token), 6)
+        );
+      case HistoryItemCateType.Revoke:
+        return i18next.t('page.transactions.itemTitle.Revoke', {
+          token: ellipsisOverflowedText(
+            getTokenSymbol(tokenApproveData[0]?.token),
+            6,
+          ),
+        });
+      case HistoryItemCateType.Contract:
+        return i18next.t('page.transactions.itemTitle.Contract');
+      case HistoryItemCateType.Cancel:
+        return i18next.t('page.transactions.itemTitle.Cancel');
+      case HistoryItemCateType.UnKnown:
+        return i18next.t('page.transactions.itemTitle.Default');
+      case HistoryItemCateType.Buy:
+        return i18next.t('page.transactions.itemTitle.Buy');
+      default:
+        return data.tx?.name
+          ? ellipsisOverflowedText(data.tx?.name, 15)
+          : i18next.t('page.transactions.itemTitle.Default');
+    }
+  })();
+
+  return {
+    tokenApproveData,
+    formatTitle,
+    formatType,
+  };
+}

@@ -1,0 +1,42 @@
+// 移除 --build-id
+def hashcheckCMakeScript = new File(project.projectDir, "hashcheck.cmake")
+
+if (!hashcheckCMakeScript.exists()) {
+    throw new GradleException("==> [Reproducible Build] ERROR: Required script not found at ${hashcheckCMakeScript.absolutePath}. Aborting.")
+}
+
+def cmakeArg = "-C${hashcheckCMakeScript.absolutePath}"
+
+def patchAndroidProject = { p, ext ->
+    try {
+        ext.buildTypes.each { buildType ->
+            def cmakeBlock = buildType.externalNativeBuild?.cmake
+            if (cmakeBlock != null) {
+                def currentArgs = cmakeBlock.arguments ?: []
+                if (!currentArgs.contains(cmakeArg)) {
+                    currentArgs.add(cmakeArg)
+                    cmakeBlock.arguments = currentArgs
+                    println "==> [Reproducible Build] Patched CMake config for project: ${p.path}, buildType: ${buildType.name}"
+                }
+            }
+        }
+    } catch (Exception e) {
+        println "==> [Reproducible Build] WARN: Failed to patch ${p.path}: ${e.message}"
+    }
+}
+
+subprojects { sub ->
+    sub.pluginManager.withPlugin('com.android.application') {
+        def androidComponents = sub.extensions.findByName('androidComponents')
+        androidComponents?.finalizeDsl { ext ->
+            patchAndroidProject(sub, ext)
+        }
+    }
+
+    sub.pluginManager.withPlugin('com.android.library') {
+        def androidComponents = sub.extensions.findByName('androidComponents')
+        androidComponents?.finalizeDsl { ext ->
+            patchAndroidProject(sub, ext)
+        }
+    }
+}

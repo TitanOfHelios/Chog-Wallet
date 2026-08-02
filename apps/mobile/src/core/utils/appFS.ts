@@ -1,0 +1,63 @@
+import { stringUtils } from '@rabby-wallet/base-utils';
+import { Platform } from 'react-native';
+import RNFS from '@rabby-wallet/react-native-fs';
+import { MMKV_FILE_NAMES } from '../storage/mmkvConstants';
+
+const isIOS = Platform.OS === 'ios';
+export const APP_DOCUMENT_LIKE_PATH = isIOS
+  ? RNFS.DocumentDirectoryPath
+  : RNFS.DocumentDirectoryPath;
+
+export const MMKV_ROOT_PATH = isIOS
+  ? `${stringUtils.unSuffix(RNFS.DocumentDirectoryPath, '/')}/mmkv`
+  : // TODO: test it on Android
+    `${stringUtils.unSuffix(RNFS.DocumentDirectoryPath, '/')}/mmkv`;
+
+export { MMKV_FILE_NAMES };
+
+export async function walkThroughMMKVFiles(
+  callback: (ctx: {
+    fileBaseName: MMKV_FILE_NAMES;
+    filePath: string;
+    fileExist: boolean;
+    crcFileBaseName: string;
+    crcFilePath: string;
+    crcFileExist: boolean;
+  }) => void,
+) {
+  Object.values(MMKV_FILE_NAMES).forEach(fileBaseName => {
+    const filePath = `${stringUtils.unSuffix(
+      MMKV_ROOT_PATH,
+      '/',
+    )}/${fileBaseName}`;
+    const crcFilePath = `${filePath}.crc`;
+
+    Promise.allSettled([RNFS.exists(filePath), RNFS.exists(crcFilePath)])
+      .then(([fileExistRet, crcFileExistRet]) => {
+        callback({
+          fileBaseName,
+          filePath,
+          fileExist:
+            fileExistRet.status === 'fulfilled' ? fileExistRet.value : false,
+          crcFileBaseName: `${fileBaseName}.crc`,
+          crcFilePath,
+          crcFileExist:
+            crcFileExistRet.status === 'fulfilled'
+              ? crcFileExistRet.value
+              : false,
+        });
+      })
+      .catch(err => {
+        console.error('walkThroughMMKVFiles error: %s', err);
+      });
+  });
+}
+
+// // leave here for debug
+// ;(function detectMMKVFilesExist() {
+//   if (!isIOS || !__DEV__) return ;
+
+//   walkThroughMMKVFiles(({ filePath, fileExist, crcFilePath, crcFileExist }) => {
+//     console.debug(`mmkv file("${filePath}"): %s; its crc file("${crcFilePath}") exist: %s`, fileExist, crcFileExist);
+//   });
+// })();

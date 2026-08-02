@@ -1,0 +1,303 @@
+import { openapi } from '@/core/request';
+import { useTheme2024 } from '@/hooks/theme';
+import addressBalanceStore from '@/store/balance';
+import { useAccountStore } from '@/store/account';
+import { findChainByServerID } from '@/utils/chain';
+import { createGetStyles2024 } from '@/utils/styles';
+import { useTranslation } from 'react-i18next';
+import { Image, View } from 'react-native';
+import useAsync from 'react-use/lib/useAsync';
+import RcIconTipsCC from '@/assets2024/icons/offlineChain/info-cc.svg';
+import RcIconCloseCC from '@/assets2024/icons/offlineChain/close-cc.svg';
+import { TouchableOpacity } from 'react-native';
+import dayjs from 'dayjs';
+import { useCallback, useEffect, useMemo } from 'react';
+import { MODAL_NAMES } from '@/components2024/GlobalBottomSheetModal/types';
+import {
+  createGlobalBottomSheetModal2024,
+  removeGlobalBottomSheetModal2024,
+} from '@/components2024/GlobalBottomSheetModal';
+import { useMockDataForHomeCenterArea } from '../hooks/homeCenterArea';
+import { isNonPublicProductionEnv } from '@/constant';
+import { Text } from '@/components/Typography';
+import { withOfflineChainService } from './offlineChainServiceDependencies';
+import {
+  clearOfflineChainTips,
+  closedTipsStore,
+  hydrateClosedTipsChains,
+  setClosedTipsChain,
+} from './offlineChainState';
+
+export const useMockClearOfflineChainTips = () => {
+  return { clearOfflineChainTips };
+};
+
+export const useOfflineChain = () => {
+  useEffect(() => {
+    void hydrateClosedTipsChains().catch(console.error);
+  }, []);
+
+  const closedTipsChains = closedTipsStore(s => s.closedTipsChains);
+  const closedTipsHydrated = closedTipsStore(s => s.hydrated);
+  const accounts = useAccountStore(s => s.accounts);
+  const { mockData } = useMockDataForHomeCenterArea();
+  const { value: offlineList } = useAsync(async () => {
+    // leave here for mock data
+    if (isNonPublicProductionEnv && mockData.forceShowOffchainNotify) {
+      return [
+        { id: 'eth', offline_at: dayjs().add(6, 'day').unix() }, // Example data
+        { id: 'bsc', offline_at: dayjs().add(6, 'day').unix() }, // Example data
+        { id: 'polygon', offline_at: dayjs().add(6, 'day').unix() }, // Example data
+      ];
+    }
+
+    return openapi.getOfflineChainList();
+  }, [mockData.forceShowOffchainNotify]);
+  const balanceSnapshots = addressBalanceStore.useAddressesSnapshot(
+    useMemo(() => {
+      return accounts.map(account => account.address.toLowerCase());
+    }, [accounts]),
+  );
+
+  const list = useMemo(() => {
+    const accountChainBalanceList = balanceSnapshots.map(snapshot => {
+      return snapshot.value?.chainList || [];
+    });
+
+    return offlineList
+      ?.filter(e => {
+        const isIn7days = dayjs
+          .unix(e.offline_at)
+          .isBefore(dayjs().add(7, 'day'));
+        const isExpired = dayjs().isAfter(dayjs.unix(e.offline_at));
+        if (!isIn7days || isExpired) {
+          return false;
+        }
+
+        if (mockData.forceShowOffchainNotify) {
+          return true;
+        }
+        return accountChainBalanceList.some(chainBalance =>
+          chainBalance?.some(chain => chain.id === e.id && chain.usd_value > 1),
+        );
+      })
+      .sort((a, b) => a.offline_at - b.offline_at);
+  }, [balanceSnapshots, offlineList, mockData.forceShowOffchainNotify]);
+
+  const displayWillClosedChain = useMemo(
+    () =>
+      closedTipsHydrated
+        ? list?.filter(e => !closedTipsChains?.includes(e.id))?.[0]
+        : undefined,
+    [closedTipsChains, closedTipsHydrated, list],
+  );
+
+  const offlineChainInfo = useMemo(
+    () =>
+      displayWillClosedChain?.id
+        ? findChainByServerID(displayWillClosedChain?.id)
+        : null,
+    [displayWillClosedChain?.id],
+  );
+
+  return {
+    displayWillClosedChain,
+    setClosedTipsChain,
+    offlineChainInfo,
+  };
+};
+
+const OfflineChainNotifyContent = ({
+  data,
+  style,
+}: {
+  data: ReturnType<typeof useOfflineChain>;
+  style?: RNViewProps['style'];
+}) => {
+  const { t } = useTranslation();
+  const { styles, colors2024 } = useTheme2024({ getStyle });
+  const {
+    displayWillClosedChain,
+    setClosedTipsChain: setClosedTipsChainForNotify,
+    offlineChainInfo: chainInfo,
+  } = data;
+
+  const handleClose = useCallback(() => {
+    if (displayWillClosedChain?.id) {
+      setClosedTipsChainForNotify(displayWillClosedChain?.id);
+    }
+  }, [displayWillClosedChain, setClosedTipsChainForNotify]);
+
+  const showTips = useCallback(() => {
+    if (!chainInfo || !displayWillClosedChain) {
+      return;
+    }
+    const modalId = createGlobalBottomSheetModal2024({
+      name: MODAL_NAMES.DESCRIPTION,
+      title: t('page.dashboard.offlineChain.chain', {
+        chain: chainInfo.name,
+      }),
+      sections: [],
+      content: (
+        <>
+          <Text style={styles.tipsDesc}>
+            {t('page.dashboard.offlineChain.tips', {
+              chain: chainInfo.name,
+              date: dayjs
+                .unix(displayWillClosedChain.offline_at)
+                .format('YYYY/MM/DD'),
+            })}
+          </Text>
+        </>
+      ),
+      bottomSheetModalProps: {
+        enableContentPanningGesture: true,
+        enablePanDownToClose: true,
+        enableDismissOnClose: true,
+        snapPoints: [350],
+      },
+      nextButtonProps: {
+        title: (
+          <Text style={styles.closeModalBtnText}>
+            {t('page.tokenDetail.excludeBalanceTipsButton')}
+          </Text>
+        ),
+        titleStyle: styles.title,
+        onPress: () => {
+          removeGlobalBottomSheetModal2024(modalId);
+        },
+      },
+    });
+  }, [
+    chainInfo,
+    displayWillClosedChain,
+    t,
+    styles.tipsDesc,
+    styles.closeModalBtnText,
+    styles.title,
+  ]);
+
+  // delegate outer to place empty holder
+  if (!displayWillClosedChain || !chainInfo) {
+    return null;
+  }
+
+  return (
+    <View style={[styles.container, style]}>
+      <Image source={{ uri: chainInfo.logo }} style={styles.logo} />
+
+      <View style={styles.textWrapper}>
+        <Text style={styles.text} numberOfLines={3} ellipsizeMode="tail">
+          {t('page.dashboard.offlineChain.chain', {
+            chain: chainInfo.name,
+          })}
+        </Text>
+      </View>
+
+      <View style={styles.actions}>
+        <TouchableOpacity onPress={showTips} style={styles.iconButton}>
+          <RcIconTipsCC
+            color={colors2024['orange-default']}
+            width={16}
+            height={16}
+          />
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[styles.iconButton, styles.closeButton]}
+          onPress={handleClose}>
+          <RcIconCloseCC
+            color={colors2024['orange-default']}
+            width={16}
+            height={16}
+          />
+        </TouchableOpacity>
+      </View>
+    </View>
+  );
+};
+
+export const OfflineChainNotify = withOfflineChainService(
+  OfflineChainNotifyContent,
+);
+
+const getStyle = createGetStyles2024(({ colors2024 }) => ({
+  container: {
+    marginHorizontal: 15,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 12,
+    backgroundColor: colors2024['orange-light-1'],
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+  },
+  containerNone: {
+    display: 'none',
+  },
+  logo: {
+    width: 16,
+    height: 16,
+    borderRadius: 9999,
+    position: 'relative',
+    top: 2,
+  },
+  textWrapper: {
+    flex: 1,
+    minWidth: 0,
+    marginLeft: 4,
+  },
+  text: {
+    color: colors2024['orange-default'],
+    fontFamily: 'SF Pro Rounded',
+    fontSize: 16,
+    fontStyle: 'normal',
+    fontWeight: 500,
+    flex: 1,
+    flexShrink: 1,
+    lineHeight: 20,
+  },
+  actions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+    marginLeft: 12,
+    position: 'relative',
+    top: -2,
+  },
+  iconButton: {
+    width: 20,
+    height: 24,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  closeButton: {
+    marginLeft: 12,
+  },
+
+  title: {
+    fontSize: 20,
+    fontWeight: '700',
+    fontFamily: 'SF Pro Rounded',
+    color: colors2024['neutral-title-1'],
+    lineHeight: 24,
+    marginTop: 5,
+  },
+  closeModalBtnText: {
+    fontSize: 20,
+    color: colors2024['neutral-InvertHighlight'],
+    fontWeight: '700',
+    fontFamily: 'SF Pro Rounded',
+  },
+
+  tipsDesc: {
+    paddingTop: 22,
+    color: colors2024['neutral-secondary'],
+    fontFamily: 'SF Pro Rounded',
+    fontSize: 16,
+    fontStyle: 'normal',
+    fontWeight: '400',
+    lineHeight: 20,
+    textAlign: 'left',
+  },
+}));

@@ -1,0 +1,119 @@
+## Pre-requisites
+# bundle install
+
+## Manage password of repo
+# fastlane match change_password
+
+## import .cert/.pkey/.p12
+# bundle exec fastlane match
+
+## Pull certificates
+# bundle exec fastlane match --readonly
+# [CONFIGURATION=development] bundle exec fastlane match --readonly
+# CONFIGURATION=release [TYPE=adhoc] bundle exec fastlane match --readonly
+# CONFIGURATION=release TYPE=appstore bundle exec fastlane match --readonly
+
+# Create, update certificates
+# [CONFIGURATION=development] bundle exec fastlane match --readonly
+# CONFIGURATION=release [TYPE=adhoc] bundle exec fastlane match --readonly
+# CONFIGURATION=release TYPE=appstore bundle exec fastlane match --readonly
+
+# available: TARGET=RabbyMobile|RabbyMobileNotification
+# Also Manage wildcard provisioning profiles, which were used for app extensions
+# - RabbyMobile is the main app target
+# - RabbyMobileNotification is the notification service extension target
+# e.g.
+# CONFIGURATION=release TYPE=adhoc [TARGET=RabbyMobile] bundle exec fastlane match --readonly
+# CONFIGURATION=release TYPE=adhoc TARGET=RabbyMobileNotification bundle exec fastlane match --readonly
+
+IS_WILDCARD = false
+EXTENSION_SUFFIX = ""
+case ENV["TARGET"]
+  when "RabbyMobileNotification"
+    IS_WILDCARD = true
+    EXTENSION_SUFFIX = ".RabbyMobileNotification"
+  else
+    EXTENSION_SUFFIX = ""
+    IS_WILDCARD = false
+end
+
+## self-hosted certificates' storage repo for debank frontend group
+## use https:// if basic MATCH_GIT_BASIC_AUTHORIZATION environment variable setup
+if ENV['MATCH_GIT_BASIC_AUTHORIZATION']
+  git_url = "https://github.com/RabbyHub/opcode-apple-auto-certificates.git"
+else
+  git_url = "git@github.com:RabbyHub/opcode-apple-auto-certificates.git"
+end
+
+biz_data = {
+  :platform => "ios",
+  # en: apple id, used to get certs
+  :username => ENV["RABBY_MOBILE_MATCH_APPLE_ID"] || "lei.chen@debank.com",
+  :team_id => "ZPNP2SF27Q",
+  # git account of certificates repo, used to update certificates
+  :git_full_name => "frontend_bot",
+  :git_user_email => "frontend_bot@debank.com",
+}
+
+input_envtype = ENV["TYPE"]
+run_type = "development"
+configuration = ENV["CONFIGURATION"]
+
+case configuration
+  when "release"
+    configuration = "release"
+  when "debug", "dev", "development"
+    configuration = "debug"
+  when "reg", "regression"
+    configuration = "regression"
+  else
+    configuration = "debug"
+end
+
+if configuration == "debug"
+    profile_name = !IS_WILDCARD ? "RabbyMobileDevelopment" : "RabbyMobileWildcardDevelopment"
+    run_type = "development"
+    app_identifiers = [
+      "com.debank.rabby-mobile-debug" + EXTENSION_SUFFIX
+    ]
+else
+  if input_envtype == nil
+    input_envtype = "adhoc"
+  end
+
+  case input_envtype
+    when "adhoc"
+      run_type = "adhoc"
+      profile_name = !IS_WILDCARD ? "RabbyMobileAdHocRegressionOpcode" : "RabbyMobileWildcardAdHocRegression"
+      app_identifiers = [
+        "com.debank.rabby-mobile-regression" + EXTENSION_SUFFIX
+      ]
+    when "appstore"
+      run_type = "appstore"
+      profile_name = !IS_WILDCARD ? "RabbyMobileAppStoreOpcode" : "RabbyMobileNotificationAppStore"
+      app_identifiers = [
+        "com.debank.rabby-mobile" + EXTENSION_SUFFIX
+      ]
+    else
+      print("Invalid ENV[\"TYPE\"] value" + input_envtype)
+  end
+end
+
+# more parameters, see https://docs.fastlane.tools/actions/match/#parameters
+
+git_url(git_url)
+git_full_name(biz_data[:git_full_name])
+git_user_email(biz_data[:git_user_email])
+# values: appstore, adhoc, development, enterprise, developer_id, mac_installer_distribution
+type(run_type)
+app_identifier(app_identifiers)
+username(biz_data[:username])
+team_id(biz_data[:team_id])
+platform(biz_data[:platform])
+skip_certificate_matching(false)
+skip_provisioning_profiles(false)
+profile_name(profile_name) if profile_name
+git_basic_authorization(ENV["MATCH_GIT_BASIC_AUTHORIZATION"]) if ENV['MATCH_GIT_BASIC_AUTHORIZATION']
+# values: mac_installer_distribution, developer_id_installer
+# additional_cert_types([additional_cert_type]) if additional_cert_type
+

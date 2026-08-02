@@ -1,0 +1,36 @@
+import React from 'react';
+import { ViewStyle } from 'react-native';
+
+import { Card } from '@/components';
+
+import { PortfolioHeader, TokenList } from '../components/PortfolioDetail';
+import { IProtocolPortfolio } from '@/store/protocols';
+
+export default React.memo(
+  ({
+    name,
+    data,
+    style,
+  }: {
+    name: string;
+    data: IProtocolPortfolio;
+    style?: ViewStyle;
+  }) => {
+    const portfolio = data._originPortfolio;
+
+    return (
+      <Card style={style}>
+        <PortfolioHeader data={data} name={name} showDescription />
+        <TokenList nfts={portfolio?.detail?.nft_list} name="LENT AGAINST" />
+        <TokenList
+          tokens={portfolio?.detail?.supply_token_list}
+          name="supplied"
+        />
+        <TokenList
+          tokens={portfolio?.detail?.reward_token_list}
+          name="rewards"
+        />
+      </Card>
+    );
+  },
+);

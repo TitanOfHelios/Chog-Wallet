@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 20 20" fill="none">
+  <g clip-path="url(#clip0_27529_13795)">
+    <ellipse cx="10.2066" cy="10.0004" rx="4.18682" ry="8.83883"
+      transform="rotate(-45 10.2066 10.0004)" stroke="currentColor" stroke-width="2"
+      stroke-linecap="round" />
+    <ellipse cx="10.2934" cy="10.0004" rx="4.18682" ry="8.83883"
+      transform="rotate(-135 10.2934 10.0004)" stroke="currentColor" stroke-width="2"
+      stroke-linecap="round" />
+  </g>
+  <defs>
+    <clipPath id="clip0_27529_13795">
+      <rect width="20" height="20" fill="white" />
+    </clipPath>
+  </defs>
+</svg>

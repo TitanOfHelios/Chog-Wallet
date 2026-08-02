@@ -1,0 +1,217 @@
+import React, { useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
+import { View } from 'react-native';
+import { Table, Col, Row } from '../Table';
+import * as Values from '../Values';
+import { Chain } from '@/constant/chains';
+import { addressUtils } from '@rabby-wallet/base-utils';
+import { useApprovalSecurityEngine } from '@/components/Approval/hooks/useApprovalSecurityEngine';
+import { getStyle } from '../getStyle';
+import { useThemeColors } from '@/hooks/theme';
+import useCommonStyle from '@/components/Approval/hooks/useCommonStyle';
+import { Text } from '@/components/Typography';
+
+const { isSameAddress } = addressUtils;
+
+interface SpenderData {
+  spender: string;
+  chain?: Chain;
+  protocol: {
+    name: string;
+    logo_url: string;
+  } | null;
+  hasInteraction: boolean;
+  bornAt: number | null;
+  rank: number | null;
+  riskExposure: number;
+  isEOA: boolean;
+  isDanger: boolean | null;
+  isRevoke?: boolean;
+}
+
+export interface Props {
+  data: SpenderData;
+  title?: React.ReactNode;
+}
+
+export interface SpenderPopupProps extends Props {
+  type: 'spender';
+}
+
+export const SpenderPopup: React.FC<Props> = ({ data, title }) => {
+  const { t } = useTranslation();
+  const { userData } = useApprovalSecurityEngine();
+  const { contractBlacklist, contractWhitelist } = userData;
+  const colors = useThemeColors();
+  const styles = getStyle(colors);
+  const commonStyle = useCommonStyle();
+
+  const { isInBlackList, isInWhiteList } = useMemo(() => {
+    return {
+      isInBlackList: contractBlacklist.some(
+        ({ address, chainId }) =>
+          isSameAddress(address, data.spender) &&
+          chainId === data.chain?.serverId,
+      ),
+      isInWhiteList: contractWhitelist.some(
+        ({ address, chainId }) =>
+          isSameAddress(address, data.spender) &&
+          chainId === data.chain?.serverId,
+      ),
+    };
+  }, [data.spender, data.chain, contractBlacklist, contractWhitelist]);
+
+  return (
+    <View>
+      <View style={styles.title}>
+        <Text style={styles.titleText}>
+          {title ||
+            (data.isRevoke
+              ? t('page.signTx.revokeTokenApprove.revokeFrom')
+              : t('page.signTx.tokenApprove.approveTo'))}
+        </Text>
+
+        <Values.AddressWithCopy
+          address={data.spender}
+          chain={data.chain}
+          iconWidth="14px"
+        />
+      </View>
+      <Table style={styles.viewMoreTable}>
+        <Col>
+          <Row style={styles.firstRow}>
+            <Text style={commonStyle.detailRowTitleText}>
+              {t('page.signTx.protocolTitle')}
+            </Text>
+          </Row>
+          <Row>
+            <Values.Protocol
+              value={data.protocol}
+              textStyle={commonStyle.detailPrimaryText}
+            />
+          </Row>
+        </Col>
+        <Col>
+          <Row style={styles.firstRow}>
+            <Text style={commonStyle.detailRowTitleText}>
+              {t('page.signTx.addressTypeTitle')}
+            </Text>
+          </Row>
+          <Row>
+            <Text style={commonStyle.detailPrimaryText}>
+              {data.isEOA ? 'EOA' : 'Contract'}
+            </Text>
+          </Row>
+        </Col>
+        <Col>
+          <Row style={styles.firstRow}>
+            <Text style={commonStyle.detailRowTitleText}>
+              {data.isEOA
+                ? t('page.signTx.firstOnChain')
+                : t('page.signTx.deployTimeTitle')}
+            </Text>
+          </Row>
+          <Row>
+            <Values.TimeSpan
+              value={data.bornAt}
+              style={commonStyle.detailPrimaryText}
+            />
+          </Row>
+        </Col>
+        <Col>
+          <Row
+            style={styles.firstRow}
+            tip={t('page.signTx.tokenApprove.contractTrustValueTip')}>
+            <Text style={commonStyle.detailRowTitleText}>
+              {t('page.signTx.trustValue')}
+            </Text>
+          </Row>
+          <Row>
+            {data.riskExposure === null ? (
+              <Text style={commonStyle.detailPrimaryText}>-</Text>
+            ) : (
+              <Values.USDValue
+                value={data.riskExposure}
+                style={commonStyle.detailPrimaryText}
+              />
+            )}
+          </Row>
+        </Col>
+        <Col>
+          <Row style={styles.firstRow}>
+            <Text style={commonStyle.detailRowTitleText}>
+              {t('page.signTx.popularity')}
+            </Text>
+          </Row>
+          <Row>
+            <Text style={commonStyle.detailPrimaryText}>
+              {data.rank
+                ? // @ts-ignore
+                  t('page.signTx.contractPopularity', [
+                    data.rank,
+                    data.chain?.name,
+                  ])
+                : '-'}
+            </Text>
+          </Row>
+        </Col>
+        <Col>
+          <Row style={styles.firstRow}>
+            <Text style={commonStyle.detailRowTitleText}>
+              {t('page.signTx.interacted')}
+            </Text>
+          </Row>
+          <Row>
+            <Values.Boolean value={data.hasInteraction} />
+          </Row>
+        </Col>
+        <Col>
+          <Row style={styles.firstRow}>
+            <Text style={commonStyle.detailRowTitleText}>
+              {t('page.signTx.addressNote')}
+            </Text>
+          </Row>
+          <Row>
+            <Values.AddressMemo
+              address={data.spender}
+              textStyle={commonStyle.detailPrimaryText}
+            />
+          </Row>
+        </Col>
+        {data.isDanger && (
+          <Col>
+            <Row style={styles.firstRow}>
+              <Text style={commonStyle.detailRowTitleText}>
+                {t('page.signTx.tokenApprove.flagByRabby')}
+              </Text>
+            </Row>
+            <Row>
+              <Values.Boolean
+                value={!!data.isDanger}
+                style={commonStyle.detailPrimaryText}
+              />
+            </Row>
+          </Col>
+        )}
+        <Col>
+          <Row style={styles.firstRow}>
+            <Text style={commonStyle.detailRowTitleText}>
+              {t('page.signTx.myMark')}
+            </Text>
+          </Row>
+          <Row>
+            <Values.AddressMark
+              isContract
+              address={data.spender}
+              chain={data.chain}
+              onBlacklist={isInBlackList}
+              onWhitelist={isInWhiteList}
+              onChange={() => null}
+              textStyle={commonStyle.detailPrimaryText}
+            />
+          </Row>
+        </Col>
+      </Table>
+    </View>
+  );
+};

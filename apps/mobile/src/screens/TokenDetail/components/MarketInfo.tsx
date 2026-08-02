@@ -1,0 +1,200 @@
+import React, { useEffect, useMemo, useRef } from 'react';
+
+import AnimatedTickerText from '@/components/Animated/AnimatedTickerText';
+import { useTheme2024 } from '@/hooks/theme';
+import { createGetStyles2024 } from '@/utils/styles';
+import { View } from 'react-native';
+import { useSharedValue } from 'react-native-reanimated';
+import { formatPrice, formatUsdValue } from '@/utils/number';
+import { useTranslation } from 'react-i18next';
+import { formatAmountValueKMB, formatUsdValueKMB } from '../util';
+import { Text } from '@/components/Typography';
+import { isNumber } from 'lodash';
+
+const PRICE_VALUE_MAX_LENGTH = 7;
+const PRICE_VALUE_BASE_FONT_SIZE = 38;
+const PRICE_VALUE_MIN_FONT_SIZE = 22;
+
+const MarketInfo = ({
+  price,
+  price24hChange,
+  marketCap,
+  totalSupply,
+  volume24h,
+  txns24h,
+  holders,
+}: {
+  price: number;
+  price24hChange?: number;
+  marketCap: string;
+  totalSupply: string;
+  volume24h: string;
+  txns24h: string;
+  holders: string;
+}) => {
+  const { styles, colors2024 } = useTheme2024({ getStyle: getStyles });
+  const { t } = useTranslation();
+  const currentIsLoss = isNumber(price24hChange) ? price24hChange < 0 : false;
+  const priceText = `$${formatPrice(price)}`;
+  const priceValue = useSharedValue(priceText);
+  const previousPriceTextRef = useRef(priceText);
+
+  useEffect(() => {
+    if (previousPriceTextRef.current === priceText) {
+      return;
+    }
+
+    previousPriceTextRef.current = priceText;
+    priceValue.value = priceText;
+  }, [priceText, priceValue]);
+
+  const percentChangeText = useMemo(() => {
+    const changeValue = isNumber(price24hChange)
+      ? formatUsdValue(price24hChange * price)
+      : '';
+    const formatPercent = isNumber(price24hChange)
+      ? Math.abs((price24hChange || 0) * 100).toFixed(2) + '%'
+      : '';
+    return isNumber(price24hChange)
+      ? `${
+          !!formatPercent && price24hChange !== 0
+            ? price24hChange > 0
+              ? '+'
+              : '-'
+            : ''
+        }${formatPercent}(${changeValue})`
+      : '';
+  }, [price24hChange, price]);
+  return (
+    <View style={styles.container}>
+      <View style={styles.priceContainer}>
+        <AnimatedTickerText
+          value={priceValue}
+          maxLength={16}
+          duration={320}
+          lineHeight={46}
+          style={styles.priceValue}
+          fontSizeByLength={{
+            maxFontSize: PRICE_VALUE_BASE_FONT_SIZE,
+            minFontSize: PRICE_VALUE_MIN_FONT_SIZE,
+            threshold: PRICE_VALUE_MAX_LENGTH,
+            step: 3,
+          }}
+        />
+        <View style={styles.priceChangeContainer}>
+          <Text
+            style={[
+              styles.priceChangeValue,
+              {
+                color: !price24hChange
+                  ? colors2024['neutral-secondary']
+                  : currentIsLoss
+                  ? colors2024['red-default']
+                  : colors2024['green-default'],
+              },
+            ]}>
+            {percentChangeText}
+          </Text>
+        </View>
+      </View>
+      <View style={styles.infoContainer}>
+        <View style={styles.infoItem}>
+          <Text style={styles.infoItemText}>
+            {t('page.tokenDetail.marketInfo.marketCap')}
+          </Text>
+          <Text style={styles.infoItemValue}>
+            {marketCap ? formatUsdValueKMB(marketCap) : '-'}
+          </Text>
+        </View>
+        <View style={styles.infoItem}>
+          <Text style={styles.infoItemText}>
+            {t('page.tokenDetail.marketInfo.totalSupply')}
+          </Text>
+          <Text style={styles.infoItemValue}>
+            {totalSupply ? formatAmountValueKMB(totalSupply) : '-'}
+          </Text>
+        </View>
+        <View style={styles.infoItem}>
+          <Text style={styles.infoItemText}>
+            {t('page.tokenDetail.marketInfo.volume24h')}
+          </Text>
+          <Text style={styles.infoItemValue}>
+            {volume24h ? formatUsdValueKMB(volume24h) : '-'}
+          </Text>
+        </View>
+        <View style={styles.infoItem}>
+          <Text style={styles.infoItemText}>
+            {t('page.tokenDetail.marketInfo.txns24h')}
+          </Text>
+          <Text style={styles.infoItemValue}>{txns24h ? txns24h : '-'}</Text>
+        </View>
+        <View style={styles.infoItem}>
+          <Text style={styles.infoItemText}>
+            {t('page.tokenDetail.marketInfo.holders')}
+          </Text>
+          <Text style={styles.infoItemValue}>
+            {holders ? formatAmountValueKMB(holders) : '-'}
+          </Text>
+        </View>
+      </View>
+    </View>
+  );
+};
+
+export default MarketInfo;
+
+const getStyles = createGetStyles2024(({ colors2024 }) => ({
+  container: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginTop: 0,
+  },
+  priceContainer: {
+    flexDirection: 'column',
+    alignItems: 'flex-start',
+  },
+  infoContainer: {
+    flexDirection: 'column',
+    gap: 2,
+  },
+  infoItem: {
+    flexDirection: 'row',
+    gap: 10,
+    justifyContent: 'space-between',
+  },
+  infoItemText: {
+    fontSize: 10,
+    lineHeight: 14,
+    color: colors2024['neutral-secondary'],
+    fontFamily: 'SF Pro Rounded',
+    fontWeight: '400',
+  },
+  infoItemValue: {
+    fontSize: 10,
+    lineHeight: 14,
+    color: colors2024['neutral-body'],
+    fontFamily: 'SF Pro Rounded',
+    fontWeight: '700',
+  },
+  priceValue: {
+    fontFamily: 'SF Pro Rounded',
+    color: colors2024['neutral-title-1'],
+    fontSize: 42,
+    lineHeight: 46,
+    fontWeight: '700',
+  },
+  priceChangeContainer: {
+    flexDirection: 'row',
+    gap: 2,
+    marginTop: 4,
+    alignItems: 'center',
+  },
+  priceChangeValue: {
+    fontFamily: 'SF Pro Rounded',
+    color: colors2024['neutral-title-1'],
+    fontSize: 17,
+    lineHeight: 22,
+    fontWeight: '700',
+    position: 'relative',
+  },
+}));

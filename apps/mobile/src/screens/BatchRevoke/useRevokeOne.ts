@@ -1,0 +1,22 @@
+import { useMiniApproval } from '@/hooks/useMiniApproval';
+import type { ApprovalSpenderItemToBeRevoked } from '../Approvals/useApprovalsPage';
+import React from 'react';
+import { buildTx } from './useBatchRevokeTask';
+import type { Account } from '@/core/startupServices/preference';
+
+export const useRevokeOne = () => {
+  const { sendMiniTransactions } = useMiniApproval();
+
+  const handleRevokeOne = React.useCallback(
+    async (revokeItem: ApprovalSpenderItemToBeRevoked, account: Account) => {
+      const tx = await buildTx(revokeItem, account);
+      return sendMiniTransactions({
+        txs: [tx],
+        account,
+      });
+    },
+    [sendMiniTransactions],
+  );
+
+  return handleRevokeOne;
+};

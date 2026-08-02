@@ -1,0 +1,125 @@
+import { OpenApiService } from '@rabby-wallet/rabby-api';
+import { notificationOpenApiStore } from '../storage/openapiStore';
+import { SignApiPlugin } from '../request';
+import { APP_VERSIONS, APPLICATION_ID } from '@/constant';
+import { makeDeviceUUID } from '../apis/device';
+import type { TxHistoryResult } from '@rabby-wallet/rabby-api/dist/types';
+import { AppState } from 'react-native';
+import { instrumentOpenApiRequestDiagnostics } from '@/utils/openapiRequestDiagnostics';
+import { APP_FEATURE_SWITCH } from '@/constant';
+
+export type DeviceActiveStatusResponse = {
+  success: boolean;
+  device_id: string;
+  is_active: boolean;
+};
+
+export type HeartbeatResponse = {
+  success: boolean;
+  device_id: string;
+  ttl: number;
+};
+
+export type BindDeviceResponse = {
+  success: boolean;
+  device_id: string;
+  total: number;
+  added: number;
+  removed: number;
+};
+
+class NotificationsOpenApiService extends OpenApiService {
+  #getDeviceUUID() {
+    return makeDeviceUUID().deviceUUID;
+  }
+  async setDeviceActiveStatus(params: {
+    // deviceId: string;
+    isActive: boolean;
+  }): Promise<DeviceActiveStatusResponse> {
+    if (!APP_FEATURE_SWITCH.transactionNotification) {
+      return {
+        success: false,
+        device_id: '',
+        is_active: false,
+      };
+    }
+
+    const response = await this.request.post('/v1/notification/device/active', {
+      device_id: this.#getDeviceUUID(),
+      is_active: params.isActive,
+    });
+    return response.data;
+  }
+
+  async heartbeat(/* params: { app_state: 'foreground' | 'background' } */): Promise<HeartbeatResponse> {
+    if (!APP_FEATURE_SWITCH.transactionNotification) {
+      return {
+        success: false,
+        device_id: '',
+        ttl: 0,
+      };
+    }
+
+    const response = await this.request.post(
+      '/v1/notification/device/heartbeat',
+      {
+        device_id: this.#getDeviceUUID(),
+        // for further usage
+        is_foreground: AppState.currentState === 'active',
+      },
+    );
+    return response.data;
+  }
+
+  async bindDevice(params: {
+    // deviceId: string;
+    platform: 'ios' | 'android';
+    pushToken: string;
+    userAddrs: string[];
+  }): Promise<BindDeviceResponse> {
+    if (!APP_FEATURE_SWITCH.transactionNotification) {
+      return {
+        success: false,
+        device_id: '',
+        total: 0,
+        added: 0,
+        removed: 0,
+      };
+    }
+
+    const response = await this.request.post('/v1/notification/bind', {
+      application_id: APPLICATION_ID,
+      device_id: this.#getDeviceUUID(),
+      platform: params.platform,
+      push_token: params.pushToken,
+      user_addrs: params.userAddrs,
+    });
+    return response.data;
+  }
+
+  async getUserTxDetail(params: {
+    chainId: string;
+    txId: string;
+    userAddr: string;
+  }): Promise<TxHistoryResult | null> {
+    const response = await this.request.get('/v1/user/tx', {
+      params: {
+        chain_id: params.chainId,
+        tx_id: params.txId,
+        id: params.userAddr.toLowerCase(),
+      },
+    });
+
+    return response.data;
+  }
+}
+
+export const notificationOpenapi = new NotificationsOpenApiService({
+  store: notificationOpenApiStore,
+  plugin: SignApiPlugin,
+  clientName: 'rabbymobile',
+  clientVersion: APP_VERSIONS.fromJs,
+});
+
+notificationOpenapi.initSync();
+instrumentOpenApiRequestDiagnostics(notificationOpenapi, 'notificationOpenapi');

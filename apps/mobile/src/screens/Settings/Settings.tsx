@@ -1,0 +1,1405 @@
+import React, { useCallback, useMemo, useRef, useState } from 'react';
+import {
+  Alert,
+  Linking,
+  Platform,
+  ScrollView,
+  TouchableOpacity,
+  View,
+} from 'react-native';
+
+import {
+  RcClearPending,
+  RcEarth,
+  RcFeedback,
+  RcNewLock,
+  RcLockWallet,
+  RcAutoLockTime,
+  RcScreenshot,
+  RcFollowUs,
+  RcInfo,
+  RcTermsOfUse,
+  RcPrivacyPolicy,
+  RcScreenRecord,
+  RcThemeMode,
+  RcAddCustomNetwork,
+  RcRPC,
+  RcGoogleDrive,
+  RcCode,
+  RcI18n,
+  RcFaceId,
+  RcFingerprint,
+  RcScreenshotReport,
+  RcIconCurrency,
+  RcNotification,
+  RcWalletConnect,
+  RcAutolock,
+  RcDataAnalysis,
+  RcBugReport,
+  RcManageWallet,
+} from '@/assets/icons/settings';
+import RcFooterLogo from '@/assets/icons/settings/footer-logo.svg';
+
+import {
+  APP_RUNTIME_ENV,
+  BUILD_CHANNEL,
+  BUILD_GIT_INFO,
+  IS_CONSOLE_STRIPPED,
+  IS_HERMES_ENABLED,
+  IS_METRO_CACHE_ENABLED,
+} from '@/constant/env';
+import { E2E_ID } from '@/constant/e2e';
+import { isNonPublicProductionEnv, NEED_DEVSETTINGBLOCKS } from '@/constant';
+import { RootNames } from '@/constant/layout';
+import {
+  makeThemeOptions,
+  SHOULD_SUPPORT_DARK_MODE,
+  useAppTheme,
+  useTheme2024,
+} from '@/hooks/theme';
+import { useSafeAndroidBottomSizes } from '@/hooks/useAppLayout';
+import { type SettingConfBlock, Block } from './Block';
+// import { useSheetWebViewTester } from './sheetModals/hooks';
+import SheetWebViewTester from './sheetModals/SheetWebViewTester';
+
+import { SwitchBiometricsAuthentication } from './components/SwitchBiometricsAuthentication';
+
+import { toast, toastLoading } from '@/components2024/Toast';
+import {
+  APP_FEATURE_SWITCH,
+  APP_URLS,
+  APP_VERSIONS,
+  INTERNAL_REQUEST_SESSION,
+} from '@/constant';
+import { openExternalUrl } from '@/core/utils/linking';
+import {
+  requestLockWalletAndBackToUnlockScreen,
+  useRabbyAppNavigation,
+} from '@/hooks/navigation';
+import { useUpgradeInfo } from '@/hooks/version';
+import { createGetStyles2024 } from '@/utils/styles';
+import { StackActions, useFocusEffect } from '@react-navigation/native';
+import {
+  ManagePasswordSheetModal,
+  ResetPasswordAndKeyringsSheetModal,
+} from '../ManagePassword/components/ManagePasswordSheetModal';
+
+import {
+  storeApisBiometrics,
+  useBiometrics,
+  useBiometricsComputed,
+} from '@/hooks/biometrics';
+import { SelectAutolockTimeBottomSheetModal } from './components/SelectAutolockTimeBottomSheetModal';
+import { AutoLockSettingLabel } from './components/LockAbout';
+import { sheetModalRefsNeedLock, useSetPasswordFirst } from '@/hooks/useLock';
+import { SwitchAppLaunchLock } from './components/SwitchAppLaunchLock';
+import { AuthenticationModal2024 } from '@/components/AuthenticationModal/AuthenticationModal2024';
+import { useShowMarkdownInWebVIewTester } from './sheetModals/MarkdownInWebViewTester';
+import ThemeSelectorModal, {
+  useThemeSelectorModalVisible,
+} from './sheetModals/ThemeSelector';
+import { RABBY_GENESIS_NFT_DATA } from '../SendNFT/testData';
+import RootScreenContainer from '@/components/ScreenContainer/RootScreenContainer';
+import { ScreenSpecificStatusBar } from '@/components/FocusAwareStatusBar';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import DevForceLocalVersionSelector, {
+  useLocalVersionSelectorModalVisible,
+} from './sheetModals/DevForceLocalVersionSelector';
+import InnerDappPreloadStrategySelector, {
+  useInnerDappPreloadStrategySelectorModalVisible,
+} from './sheetModals/InnerDappPreloadStrategySelector';
+import { useInnerDappPreloadRetention } from '@/config/innerDappPreloadRetention';
+import { useShowUserAgreementLikeModal } from '../ManagePassword/components/UserAgreementLikeModalInner';
+import WalletLockTestItemModal, {
+  useWalletLockTestItemModalVisible,
+} from './sheetModals/DevWalletLock';
+import DevUIPlaygroundModal, {
+  useDevUIPlaygroundModalVisible,
+} from './sheetModals/DevUIPlayground';
+import DevDataPlayground, {
+  useDevDataPlaygroundModalVisible,
+} from './sheetModals/DevDataPlayground';
+import DevCapabilityPlaygroundModal, {
+  useDevCapabilityPlaygroundModalVisible,
+} from './sheetModals/DevCapabilityPlayground';
+import CurrentLanguageSelectorModal, {
+  useCurrentLanguageModalVisible,
+} from './sheetModals/LanguageSelector';
+import dayjs from 'dayjs';
+import { useTranslation } from 'react-i18next';
+import {
+  clearAppDataSource,
+  dropAppDataSourceAndQuitApp,
+} from '@/databases/imports';
+import { AppCacheSizeText } from './components/SpecialText';
+import { IS_ANDROID, IS_IOS } from '@/core/native/utils';
+import { abortAllSyncTasks } from '@/databases/sync/_task';
+import { resetUpdateHistoryTime } from '@/hooks/historyTokenDict';
+import { sendRequest } from '@/core/apis/sendRequest';
+import { ClearPendingPopup } from './components/ClearPendingPopup';
+import { OpenApiPopup } from './components/OpenApiPopup';
+import {
+  getFallbackAccountSnapshot,
+  setUserBehaviorTrackingOptOutSync,
+} from '@/core/serviceApi/preference';
+import { useClearBrowserData } from '@/hooks/browser/useClearBrowserData';
+import { useMultiPress } from '@/hooks/tap';
+import {
+  DevModalDevServer,
+  useDevServerModalVisible,
+} from './Modals/DevModalDevServer';
+import {
+  FORCE_DISABLE_FEEDBACK_BY_SCREENSHOT,
+  toggleFeedbackHistoryVisible,
+  useScreenshotToReportEnabled,
+} from '@/components/Screenshot/hooks';
+import { SwitchScreenshotToReport } from './components/SwitchScreenshotToReport';
+import {
+  CurrencySelectorPopup,
+  useCurrentCurrencyVisible,
+} from './sheetModals/CurrencySelectorPopup';
+import { isOnlineWorkerThreadEnabled } from '@/core/config/online';
+import { isWorkerThreadRunning } from '@/perfs/thread';
+import {
+  setEnableTransactionNofification,
+  useAppNotificationEnabled,
+} from '@/hooks/appNotification';
+import type { SwitchToggleType } from '@/components/customized/Switch2024';
+import { AppSwitch2024 } from '@/components/customized/Switch2024';
+import type { SupportedLang } from '@/utils/i18n';
+import type { CurrencyItem } from '@rabby-wallet/rabby-api/dist/types';
+import {
+  trackSettingsCurrency,
+  trackSettingsFaceId,
+  trackSettingsLanguage,
+  trackSettingsLockTime,
+  trackSettingsScreenshotToBug,
+  trackSettingsTxNotification,
+} from '@/utils/analytics0331';
+import { Text } from '@/components/Typography';
+import { useAppSecurityChain } from '@/hooks/global';
+import { useToggleShowUnlockStatusBar } from '@/hooks/appSettings';
+import { SwitchShowFloatingUnlockStatusBar } from './components/SwitchFloatingView';
+import {
+  SwitchDataAnalysis,
+  SwitchUserBehaviorTrackingOptOut,
+} from './components/SwitchUserBehaviorTrackingOptOut';
+import { sleep } from '@/utils/async';
+import { CustomSkeleton } from '@/components2024/CustomSkeleton';
+import { getUserBehaviorTrackingOptOut } from '@/utils/trackingOptOut';
+import {
+  createGlobalBottomSheetModal2024,
+  removeGlobalBottomSheetModal2024,
+} from '@/components2024/GlobalBottomSheetModal';
+import { MODAL_NAMES } from '@/components2024/GlobalBottomSheetModal/types';
+import { apiGlobalModal } from '@/components2024/GlobalBottomSheetModal/apiGlobalModal';
+
+const LAYOUTS = {
+  fiexedFooterHeight: 50,
+};
+const CLEAR_APP_CACHE_EXIT_DELAY_MS = 2000;
+
+const isIOS = Platform.OS === 'ios';
+
+function TrackedTransactionNotificationSwitch() {
+  const { value } = useAppNotificationEnabled();
+
+  const handleToggle = useCallback(async (nextEnabled: boolean) => {
+    const finalValue = await setEnableTransactionNofification(nextEnabled);
+    if (typeof finalValue !== 'boolean') {
+      return;
+    }
+
+    trackSettingsTxNotification(finalValue).catch(error => {
+      console.error('trackSettingsTxNotification failed', error);
+    });
+  }, []);
+
+  return (
+    <AppSwitch2024
+      circleSize={20}
+      changeValueImmediately={false}
+      value={!!value}
+      onValueChange={handleToggle}
+    />
+  );
+}
+
+function getInnerDappPreloadStrategyLabel(strategy: string) {
+  switch (strategy) {
+    case 'legacy':
+      return 'Legacy';
+    case 'screen':
+      return 'Screen';
+    default:
+      return strategy;
+  }
+}
+
+function AlertBuildInfo({
+  rabbitCodeLen,
+}: {
+  rabbitCodeLen?: number | null;
+} = {}) {
+  const commonInfos = [
+    `Build Channel: ${BUILD_CHANNEL}`,
+    `Runtime Env: ${APP_RUNTIME_ENV}`,
+    !!BUILD_GIT_INFO.BUILD_TIME &&
+      `Build Time: ${dayjs(BUILD_GIT_INFO.BUILD_TIME).format(
+        'YYYY-MM-DD HH:mm:ss',
+      )}`,
+    `Commit Hash: ${BUILD_GIT_INFO.BUILD_GIT_HASH}`,
+    `rabbit_code_len: ${rabbitCodeLen ?? 'unknown'}`,
+    '   ',
+    `Hermes Engine: ${IS_HERMES_ENABLED ? 'Enabled' : 'Disabled'}`,
+    `Strip Console: ${IS_CONSOLE_STRIPPED ? 'Enabled' : 'Disabled'}`,
+    `Worker Thread Switch: ${
+      isOnlineWorkerThreadEnabled() ? 'Enabled' : 'Disabled'
+    }`,
+    `Worker Thread Running: ${isWorkerThreadRunning() ? 'Yes' : 'No'}`,
+  ];
+
+  if (isNonPublicProductionEnv) {
+    Alert.alert(
+      'Build Info',
+      [
+        ...commonInfos,
+        '   ',
+        !!BUILD_GIT_INFO.BUILD_GIT_HASH_TIME &&
+          `Lastest Commit: ${dayjs(BUILD_GIT_INFO.BUILD_GIT_HASH_TIME).format(
+            'YYYY-MM-DD HH:mm:ss',
+          )}`,
+        !!BUILD_GIT_INFO.BUILD_GIT_COMMITOR &&
+          `Lastest Commitor: ${BUILD_GIT_INFO.BUILD_GIT_COMMITOR}`,
+      ]
+        .filter(Boolean)
+        .join('\n'),
+      [
+        {
+          text: 'OK',
+        },
+      ],
+    );
+  } else {
+    Alert.alert('Build Info', [...commonInfos].filter(Boolean).join('\n'), [
+      {
+        text: 'OK',
+      },
+    ]);
+  }
+}
+
+const { switchBiometricsRef, selectAutolockTimeRef } = sheetModalRefsNeedLock;
+type CustomSettingItem = {
+  key: string;
+  render: () => React.ReactNode;
+};
+type SettingBlock = Omit<SettingConfBlock, 'items'> & {
+  items: Array<SettingConfBlock['items'][number] | CustomSettingItem>;
+};
+function isCustomSettingItem(
+  item: SettingBlock['items'][number],
+): item is CustomSettingItem {
+  return 'render' in item;
+}
+
+function ClearAppCacheSettingItem() {
+  const { styles } = useTheme2024({ getStyle: getStyles });
+  const { t } = useTranslation();
+  const [isClearing, setIsClearing] = useState(false);
+
+  const handleClearIOSAppCache = useCallback(async () => {
+    if (isClearing) {
+      return;
+    }
+    setIsClearing(true);
+    try {
+      abortAllSyncTasks('clear-app-cache-ios');
+      resetUpdateHistoryTime();
+      await clearAppDataSource();
+      Alert.alert(
+        t('page.settingModal.clearAppCache.iOSToastTitle'),
+        t('page.settingModal.clearAppCache.iOSToastDesc'),
+        [],
+      );
+    } finally {
+      setIsClearing(false);
+    }
+  }, [isClearing, t]);
+
+  const handleClearAndroidAppCache = useCallback(async () => {
+    if (isClearing) {
+      return;
+    }
+    setIsClearing(true);
+    const hideLoading = toastLoading(
+      t('page.settingModal.clearAppCache.clearingToast'),
+      {
+        blockInteraction: true,
+      },
+    );
+
+    try {
+      await sleep(50);
+      abortAllSyncTasks('clear-app-cache-android');
+      resetUpdateHistoryTime();
+      await dropAppDataSourceAndQuitApp({
+        exitDelayMs: CLEAR_APP_CACHE_EXIT_DELAY_MS,
+      });
+      hideLoading();
+      toast.success(t('page.settingModal.clearAppCache.clearDoneQuitToast'), {
+        duration: CLEAR_APP_CACHE_EXIT_DELAY_MS,
+        hideOnPress: false,
+        position: toast.positions.CENTER,
+      });
+    } catch (error) {
+      hideLoading();
+      setIsClearing(false);
+      console.error('[Settings] clear app cache failed', error);
+      toast.error(String(error || 'Clear cache failed'));
+    }
+  }, [isClearing, t]);
+
+  const handlePress = useCallback(() => {
+    if (isClearing) {
+      return;
+    }
+    Alert.alert(
+      t('page.settingModal.clearAppCache.title'),
+      t('page.settingModal.clearAppCache.clearAppCacheDesc'),
+      [
+        { text: t('common.dialog.button.cancel'), onPress: () => {} },
+        IS_IOS
+          ? {
+              text: t('page.settingModal.clearAppCache.button.clear'),
+              style: 'destructive',
+              onPress: handleClearIOSAppCache,
+            }
+          : {
+              text: t('page.settingModal.clearAppCache.button.clear_and_quit'),
+              style: 'destructive',
+              onPress: handleClearAndroidAppCache,
+            },
+      ],
+    );
+  }, [handleClearAndroidAppCache, handleClearIOSAppCache, isClearing, t]);
+
+  return (
+    <Block.Item
+      label={t('page.setting.appCache')}
+      icon={RcClearPending}
+      disabled={isClearing}
+      rightNode={
+        IS_IOS
+          ? undefined
+          : ({ rightIconNode }) => {
+              return (
+                <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                  {isClearing ? (
+                    <CustomSkeleton
+                      width={64}
+                      height={16}
+                      style={{ borderRadius: 8, marginRight: 8 }}
+                    />
+                  ) : (
+                    <AppCacheSizeText
+                      style={{
+                        ...styles.rightText,
+                        paddingRight: 8,
+                      }}
+                    />
+                  )}
+                  {rightIconNode}
+                </View>
+              );
+            }
+      }
+      onPress={handlePress}
+    />
+  );
+}
+
+function SettingsBlocks() {
+  const { colors, styles, isLight, colors2024 } = useTheme2024({
+    getStyle: getStyles,
+  });
+
+  const [isShowClearPendingPopup, setIsShowClearPendingPopup] = useState(false);
+
+  const { shouldRedirectToSetPasswordBefore } = useSetPasswordFirst();
+  // const selectAutolockTimeRef = useRef<BottomSheetModal>(null);
+  const startSelectAutolockTime = useCallback(() => {
+    if (
+      shouldRedirectToSetPasswordBefore({
+        onSettingsAction: 'setAutoLockExpireTime',
+      })
+    ) {
+      return;
+    }
+    selectAutolockTimeRef.current?.present();
+  }, [shouldRedirectToSetPasswordBefore]);
+
+  const startLockWallet = useCallback(() => {
+    if (
+      shouldRedirectToSetPasswordBefore({
+        onSettingsAction: 'lockWallet',
+      })
+    ) {
+      return;
+    }
+    requestLockWalletAndBackToUnlockScreen();
+  }, [shouldRedirectToSetPasswordBefore]);
+
+  const { localVersion, remoteVersion, triggerCheckVersion } = useUpgradeInfo();
+
+  const {
+    computed: { isFaceID },
+    fetchBiometrics,
+  } = useBiometrics({ autoFetch: true });
+
+  useFocusEffect(
+    useCallback(() => {
+      fetchBiometrics();
+    }, [fetchBiometrics]),
+  );
+
+  const { currentLangLabel, setCurrentLanguageModalVisible } =
+    useCurrentLanguageModalVisible();
+
+  const { currency, setIsShowCurrencyPopup } = useCurrentCurrencyVisible();
+
+  const { setThemeSelectorModalVisible } = useThemeSelectorModalVisible();
+  const { appTheme } = useAppTheme();
+  const { t } = useTranslation();
+  const appThemeText = useMemo(() => {
+    return (
+      makeThemeOptions(t).find(item => item.value === appTheme)?.title || ''
+    );
+  }, [appTheme, t]);
+
+  const navigation = useRabbyAppNavigation();
+
+  const biometricsComputed = useBiometricsComputed();
+  const { couldSetupBiometrics, isUsingDevicePasscodeForSettings } =
+    biometricsComputed;
+  const biometricsUnavailableForSettings =
+    !couldSetupBiometrics && !isUsingDevicePasscodeForSettings;
+  const disabledBiometrics = !APP_FEATURE_SWITCH.biometricsAuth;
+
+  const showBiometricsUnavailableToast = useCallback(() => {
+    toast.show('Please enable biometric permissions in the system settings.');
+  }, []);
+
+  const startSwitchBiometrics = useCallback(() => {
+    if (biometricsUnavailableForSettings) {
+      showBiometricsUnavailableToast();
+      return;
+    }
+
+    if (
+      shouldRedirectToSetPasswordBefore({ onSettingsAction: 'setBiometrics' })
+    ) {
+      return;
+    }
+    switchBiometricsRef.current?.toggle();
+  }, [
+    biometricsUnavailableForSettings,
+    shouldRedirectToSetPasswordBefore,
+    showBiometricsUnavailableToast,
+  ]);
+
+  const { viewTermsOfUse, viewPrivacyPolicy } = useShowUserAgreementLikeModal();
+
+  const { clearBrowserData } = useClearBrowserData();
+
+  const { toggleScreenshotToReport } = useScreenshotToReportEnabled();
+  const handleBiometricsToggleSuccess = useCallback((enabled: boolean) => {
+    trackSettingsFaceId(enabled).catch(error => {
+      console.error('trackSettingsFaceId failed', error);
+    });
+  }, []);
+
+  const handleTransactionNotificationToggle = useCallback(async () => {
+    if (!APP_FEATURE_SWITCH.transactionNotification) {
+      return;
+    }
+
+    const finalValue = await setEnableTransactionNofification(prev => !prev);
+    if (typeof finalValue !== 'boolean') {
+      return;
+    }
+
+    trackSettingsTxNotification(finalValue).catch(error => {
+      console.error('trackSettingsTxNotification failed', error);
+    });
+  }, []);
+
+  const handleScreenshotToBugToggle = useCallback(
+    (enabled?: boolean) => {
+      const nextEnabled = toggleScreenshotToReport(enabled);
+      trackSettingsScreenshotToBug(nextEnabled).catch(error => {
+        console.error('trackSettingsScreenshotToBug failed', error);
+      });
+    },
+    [toggleScreenshotToReport],
+  );
+
+  const handleAutoLockSelect = useCallback((ms: number) => {
+    trackSettingsLockTime(ms).catch(error => {
+      console.error('trackSettingsLockTime failed', error);
+    });
+  }, []);
+
+  const handleLanguageSelect = useCallback((lang: SupportedLang) => {
+    trackSettingsLanguage(lang).catch(error => {
+      console.error('trackSettingsLanguage failed', error);
+    });
+  }, []);
+
+  const handleCurrencySelect = useCallback((item: CurrencyItem) => {
+    trackSettingsCurrency(item.code).catch(error => {
+      console.error('trackSettingsCurrency failed', error);
+    });
+  }, []);
+
+  const toggleDataAnalysisRef = useRef<SwitchToggleType>(null);
+  const switchAppLaunchLockRef = useRef<SwitchToggleType>(null);
+
+  const modalRef =
+    useRef<ReturnType<typeof createGlobalBottomSheetModal2024>>(undefined);
+
+  const handleWalletsListPress = useCallback(() => {
+    if (modalRef.current) {
+      removeGlobalBottomSheetModal2024(modalRef.current);
+    }
+
+    modalRef.current = createGlobalBottomSheetModal2024({
+      name: MODAL_NAMES.ADDRESS_LiST,
+      variant: 'manage',
+      subTitle: t('page.settings.chooseWallet'),
+      onAddAddressPress: () => {
+        if (modalRef.current) {
+          removeGlobalBottomSheetModal2024(modalRef.current);
+        }
+        apiGlobalModal.showAddSelectMethodModal();
+      },
+      bottomSheetModalProps: {
+        handleStyle: {
+          backgroundColor: isLight
+            ? colors2024['neutral-bg-0']
+            : colors2024['neutral-bg-1'],
+        },
+      },
+      onDone: () => {
+        removeGlobalBottomSheetModal2024(modalRef.current);
+        modalRef.current = undefined;
+      },
+    });
+  }, [colors2024, isLight, t]);
+
+  const settingsBlocks: Record<string, SettingBlock> = (() => {
+    return {
+      features: {
+        label: t('page.setting.features'),
+        items: [
+          {
+            label: t('page.setting.manageWallets'),
+            icon: RcManageWallet,
+            onPress: () => {
+              handleWalletsListPress();
+            },
+          },
+          {
+            label: 'WalletConnect',
+            icon: RcWalletConnect,
+            onPress: () => {
+              navigation.dispatch(
+                StackActions.push(RootNames.StackSettings, {
+                  screen: RootNames.WalletConnect,
+                }),
+              );
+            },
+          },
+        ],
+      },
+      settings: {
+        label: t('page.setting.screenTitle'),
+        items: [
+          {
+            label: biometricsComputed.systemAuthSettingsLabel,
+            icon: isUsingDevicePasscodeForSettings
+              ? RcAutolock
+              : isFaceID
+              ? RcFaceId
+              : RcFingerprint,
+            rightNode: (
+              <SwitchBiometricsAuthentication
+                ref={switchBiometricsRef}
+                onToggleSuccess={handleBiometricsToggleSuccess}
+                onUnavailablePress={showBiometricsUnavailableToast}
+              />
+            ),
+            onPress: () => {
+              startSwitchBiometrics();
+            },
+            onDisabledPress: biometricsUnavailableForSettings
+              ? showBiometricsUnavailableToast
+              : undefined,
+            disabled: disabledBiometrics || biometricsUnavailableForSettings,
+            visible: APP_FEATURE_SWITCH.biometricsAuth,
+          },
+          {
+            label: t('page.setting.transactionNotification'),
+            icon: RcNotification,
+            rightNode: <TrackedTransactionNotificationSwitch />,
+            visible: APP_FEATURE_SWITCH.transactionNotification,
+            onPress: () => {
+              handleTransactionNotificationToggle();
+            },
+          },
+          {
+            label: t('page.setting.autoLockTime'),
+            icon: RcAutoLockTime,
+            onPress: () => {
+              startSelectAutolockTime();
+            },
+            rightTextNode: <AutoLockSettingLabel style={styles.rightText} />,
+          },
+          {
+            label: t('page.setting.appLaunchLock'),
+            icon: RcAutolock,
+            rightNode: <SwitchAppLaunchLock ref={switchAppLaunchLockRef} />,
+            onPress: () => {
+              switchAppLaunchLockRef.current?.toggle();
+            },
+            visible: APP_FEATURE_SWITCH.customizePassword,
+          },
+          {
+            label: t('page.setting.currentLanguage'),
+            icon: RcI18n,
+            onPress: () => {
+              setCurrentLanguageModalVisible(true);
+            },
+            rightTextNode: (
+              <Text style={styles.rightText}>{currentLangLabel}</Text>
+            ),
+          },
+          {
+            label: t('page.setting.currency'),
+            icon: RcIconCurrency,
+            onPress: () => {
+              setIsShowCurrencyPopup(true);
+            },
+            rightTextNode: (
+              <Text style={styles.rightText}>{currency?.code}</Text>
+            ),
+          },
+          {
+            label: t('page.setting.addCustomNetwork'),
+            icon: RcAddCustomNetwork,
+            onPress: () => {
+              navigation.dispatch(
+                StackActions.push(RootNames.StackSettings, {
+                  screen: RootNames.CustomTestnet,
+                  params: {
+                    source: 'settings',
+                  },
+                }),
+              );
+            },
+          },
+          // {
+          //   label: t('page.setting.modifyRPCURL'),
+          //   icon: RcRPC,
+          //   onPress: () => {
+          //     navigation.dispatch(
+          //       StackActions.push(RootNames.StackSettings, {
+          //         screen: RootNames.CustomRPC,
+          //         params: {
+          //           source: 'settings',
+          //         },
+          //       }),
+          //     );
+          //   },
+          // },
+          {
+            visible: SHOULD_SUPPORT_DARK_MODE,
+            label: t('page.setting.themeMode'),
+            icon: RcThemeMode,
+            onPress: () => {
+              setThemeSelectorModalVisible(true);
+            },
+            rightTextNode: ctx => {
+              return <Text style={styles.rightText}>{appThemeText}</Text>;
+            },
+          },
+          {
+            label: t('page.setting.clearPending'),
+            icon: RcClearPending,
+            onPress: () => {
+              setIsShowClearPendingPopup(true);
+            },
+          },
+        ],
+      },
+      aboutus: {
+        label: t('page.setting.aboutUs'),
+        items: [
+          {
+            label: t('page.setting.currentVersion'),
+            icon: RcInfo,
+            rightNode: ({ rightIconNode }) => {
+              return (
+                <View style={{ flexDirection: 'row' }}>
+                  <Text style={styles.rightText}>
+                    {localVersion || APP_VERSIONS.fromJs}
+                    {IS_METRO_CACHE_ENABLED ? ' · MC' : ''}
+                  </Text>
+                  {remoteVersion.couldUpgrade && (
+                    <Text
+                      style={{
+                        ...styles.rightText,
+                        color: colors['red-default'],
+                        paddingRight: 4,
+                      }}>
+                      (New version)
+                    </Text>
+                  )}
+                  {rightIconNode}
+                </View>
+              );
+            },
+            onPress: triggerCheckVersion,
+          },
+          // {
+          //   label: t('page.setting.feedback'),
+          //   icon: RcFeedback,
+          //   onPress: () => {
+          //     Linking.openURL('https://discord.gg/AvYmaTjrBu');
+          //   },
+          // },
+          // TODO: in the future
+          // {
+          //   label: 'Support Chains',
+          //   icon: RcSupportChains,
+          //   onPress: () => {},
+          // },
+          {
+            label: t('page.setting.followUs'),
+            icon: RcFollowUs,
+            onPress: () => {
+              openExternalUrl(APP_URLS.TWITTER);
+            },
+          },
+          {
+            label: t('page.setting.tou'),
+            icon: RcTermsOfUse,
+            onPress: async () => {
+              viewTermsOfUse();
+            },
+          },
+          {
+            label: t('page.setting.policy'),
+            icon: RcPrivacyPolicy,
+            onPress: async () => {
+              viewPrivacyPolicy();
+            },
+          },
+        ].filter(Boolean),
+      },
+      extra: {
+        label: '',
+        items: [
+          {
+            label: t('page.setting.lockWallet'),
+            icon: RcNewLock,
+            onPress: () => {
+              startLockWallet();
+            },
+            visible: APP_FEATURE_SWITCH.customizePassword,
+          },
+          {
+            key: 'clear-app-cache',
+            render: () => <ClearAppCacheSettingItem />,
+          },
+          // {
+          //   label: t('page.setting.clearBrowserData'),
+          //   icon: RcClearPending,
+          //   onPress: () => {
+          //     Alert.alert(
+          //       t('page.settingModal.clearBrowserData.title'),
+          //       t('page.settingModal.clearBrowserData.desc'),
+          //       [
+          //         { text: t('common.dialog.button.cancel'), onPress: () => {} },
+          //         {
+          //           text: t('page.settingModal.clearBrowserData.button'),
+          //           style: 'destructive',
+          //           onPress: async () => {
+          //             clearBrowserData();
+          //             toast.success('Cleared');
+          //           },
+          //         },
+          //       ],
+          //     );
+          //   },
+          // },
+        ],
+      },
+    };
+  })();
+
+  return (
+    <>
+      {Object.entries(settingsBlocks).map(([key, block], idx) => {
+        const l1key = `${key}-${idx}`;
+
+        return (
+          <Block
+            key={l1key}
+            label={block.label}
+            style={[
+              idx > 0 &&
+                !!block.label && {
+                  marginTop: 16,
+                },
+            ]}>
+            {block.items.map((item, idx_l2) => {
+              if (isCustomSettingItem(item)) {
+                return (
+                  <React.Fragment key={`${l1key}-${item.key}-${idx_l2}`}>
+                    {item.render()}
+                  </React.Fragment>
+                );
+              }
+
+              return (
+                <Block.Item
+                  key={`${l1key}-${item.label}-${idx_l2}`}
+                  {...item}
+                />
+              );
+            })}
+          </Block>
+        );
+      })}
+
+      <ClearPendingPopup
+        visible={isShowClearPendingPopup}
+        onClose={() => {
+          setIsShowClearPendingPopup(false);
+        }}
+        onConfirm={() => {
+          setIsShowClearPendingPopup(false);
+        }}
+      />
+
+      <SelectAutolockTimeBottomSheetModal
+        ref={selectAutolockTimeRef}
+        onSelectTimeMs={handleAutoLockSelect}
+      />
+
+      <CurrentLanguageSelectorModal onSelectLanguage={handleLanguageSelect} />
+
+      <CurrencySelectorPopup onSelectCurrency={handleCurrencySelect} />
+    </>
+  );
+}
+
+function DevSettingsBlocks({
+  onShowBuildInfo,
+}: {
+  onShowBuildInfo: () => void;
+}) {
+  const { colors } = useTheme2024({ getStyle: getStyles });
+  const navigation = useRabbyAppNavigation();
+
+  const {
+    computed: { isFaceID },
+    fetchBiometrics,
+  } = useBiometrics({ autoFetch: true });
+
+  useFocusEffect(
+    useCallback(() => {
+      fetchBiometrics();
+    }, [fetchBiometrics]),
+  );
+
+  const { viewMarkdownInWebView } = useShowMarkdownInWebVIewTester();
+
+  const { currentLocalVersion, setLocalVersionSelectorModalVisible } =
+    useLocalVersionSelectorModalVisible();
+  const {
+    currentStrategy: innerDappPreloadStrategy,
+    setVisible: setInnerDappPreloadStrategySelectorVisible,
+  } = useInnerDappPreloadStrategySelectorModalVisible();
+  const innerDappPreloadRetention = useInnerDappPreloadRetention();
+  const innerDappRetentionLabel =
+    innerDappPreloadStrategy === 'screen' ? 1 : innerDappPreloadRetention;
+  const innerDappPreloadLabel = `${getInnerDappPreloadStrategyLabel(
+    innerDappPreloadStrategy,
+  )} · ${innerDappRetentionLabel}`;
+
+  const { setWalletTestItemModalVisible } = useWalletLockTestItemModalVisible();
+  const { setDevUIPlaygroundModalVisible } = useDevUIPlaygroundModalVisible();
+  const { setDataPlaygroundModalVisible } = useDevDataPlaygroundModalVisible();
+  const { setDevCapabilityPlaygroundModalVisible } =
+    useDevCapabilityPlaygroundModalVisible();
+
+  const openLogVerificationScreen = useCallback(
+    (
+      screen:
+        | typeof RootNames.DebugLogViewer
+        | typeof RootNames.StartupPerformanceLogViewer,
+    ) => {
+      navigation.dispatch(
+        StackActions.push(RootNames.StackTestkits, {
+          screen,
+        }),
+      );
+    },
+    [navigation],
+  );
+
+  const showLogVerificationPicker = useCallback(() => {
+    Alert.alert('Log Verification', 'Choose a log type to inspect.', [
+      {
+        text: 'App File Logs',
+        onPress: () => openLogVerificationScreen(RootNames.DebugLogViewer),
+      },
+      {
+        text: 'Startup Performance Logs',
+        onPress: () =>
+          openLogVerificationScreen(RootNames.StartupPerformanceLogViewer),
+      },
+      {
+        text: 'Cancel',
+        style: 'cancel',
+      },
+    ]);
+  }, [openLogVerificationScreen]);
+
+  const [isShowOpenApiPopup, setIsShowOpenApiPopup] = useState(false);
+  const { setDevServerSettingsModalVisible } = useDevServerModalVisible();
+  const currentAccount = getFallbackAccountSnapshot();
+  const { toggleShowUnlockStatusBar } = useToggleShowUnlockStatusBar();
+  const toggleUserBehaviorTrackingOptOut = useCallback(() => {
+    setUserBehaviorTrackingOptOutSync(!getUserBehaviorTrackingOptOut());
+  }, []);
+
+  const devSettingsBlocks: Record<string, SettingConfBlock> = (() => {
+    return {
+      ...(isNonPublicProductionEnv && {
+        testkits: {
+          label: 'Test Kits (Not present on production package)',
+          items: [
+            {
+              label: 'Build Info',
+              icon: RcInfo,
+              onPress: onShowBuildInfo,
+              rightNode: (
+                <Text style={{ color: colors['neutral-body'] }}>
+                  {BUILD_CHANNEL} - {BUILD_GIT_INFO.BUILD_GIT_HASH}
+                </Text>
+              ),
+              // TODO: only show in non-production mode
+              visible: NEED_DEVSETTINGBLOCKS,
+            },
+            {
+              label: 'User Behavior Tracking Opt-out',
+              icon: RcPrivacyPolicy,
+              onPress: () => {
+                toggleUserBehaviorTrackingOptOut();
+              },
+              rightNode: (
+                <SwitchUserBehaviorTrackingOptOut
+                  onPress={evt => evt.stopPropagation()}
+                />
+              ),
+              visible: NEED_DEVSETTINGBLOCKS,
+            },
+            {
+              label: 'Force local version',
+              icon: RcInfo,
+              onPress: () => {
+                setLocalVersionSelectorModalVisible(true);
+              },
+              rightTextNode: (
+                <Text style={{ color: colors['neutral-body'] }}>
+                  Runtime: {currentLocalVersion}
+                </Text>
+              ),
+              // TODO: only show in non-production mode
+              visible: NEED_DEVSETTINGBLOCKS,
+            },
+            {
+              label: 'Inner Dapp Preload',
+              icon: RcCode,
+              onPress: () => {
+                setInnerDappPreloadStrategySelectorVisible(true);
+              },
+              rightTextNode: (
+                <Text style={{ color: colors['neutral-body'] }}>
+                  {innerDappPreloadLabel}
+                </Text>
+              ),
+              visible: NEED_DEVSETTINGBLOCKS,
+            },
+            {
+              label: 'Backend Service URL',
+              icon: RcCode,
+              onPress: async () => {
+                setIsShowOpenApiPopup(true);
+              },
+            },
+            {
+              label: '[Security] Wallet Lock & Password',
+              icon: RcLockWallet,
+              onPress: async () => {
+                setWalletTestItemModalVisible(true);
+              },
+            },
+            {
+              label: 'Show Unlock Status Bar',
+              icon: RcLockWallet,
+              onPress: () => {
+                toggleShowUnlockStatusBar();
+              },
+              rightNode: (
+                <SwitchShowFloatingUnlockStatusBar
+                  onPress={evt => evt.stopPropagation()}
+                />
+              ),
+              visible: NEED_DEVSETTINGBLOCKS,
+            },
+            {
+              label: 'Regression Switches',
+              icon: RcCode,
+              onPress: () => {
+                navigation.dispatch(
+                  StackActions.push(RootNames.StackTestkits, {
+                    screen: RootNames.DevSwitches,
+                  }),
+                );
+              },
+            },
+            {
+              label: 'LAN Dev Server Settings',
+              icon: RcCode,
+              onPress: async () => {
+                setDevServerSettingsModalVisible(true);
+              },
+            },
+            {
+              label: 'UI Playground',
+              icon: RcCode,
+              testID: E2E_ID.settings.uiPlayground,
+              onPress: () => {
+                setDevUIPlaygroundModalVisible(true);
+              },
+            },
+            {
+              label: 'Data Playground',
+              icon: RcCode,
+              onPress: () => {
+                setDataPlaygroundModalVisible(true);
+              },
+            },
+            {
+              label: 'Capability Playground',
+              icon: RcCode,
+              onPress: () => {
+                setDevCapabilityPlaygroundModalVisible(true);
+              },
+            },
+            {
+              label: 'WalletConnect Log',
+              icon: RcCode,
+              onPress: () => {
+                navigation.dispatch(
+                  StackActions.push(RootNames.StackTestkits, {
+                    screen: RootNames.DevUIWalletConnect,
+                  }),
+                );
+              },
+            },
+            {
+              label: 'Log Verification',
+              icon: RcCode,
+              onPress: showLogVerificationPicker,
+            },
+          ],
+        },
+      }),
+      ...(__DEV__ && {
+        devlab: {
+          label: 'Dev Lab',
+          icon: RcEarth,
+          items: [
+            {
+              label: 'Inner Dapp Preload',
+              icon: RcCode,
+              onPress: () => {
+                setInnerDappPreloadStrategySelectorVisible(true);
+              },
+              rightTextNode: (
+                <Text style={{ color: colors['neutral-body'] }}>
+                  {innerDappPreloadLabel}
+                </Text>
+              ),
+            },
+            // {
+            //   label: 'WebView Test',
+            //   icon: RcEarth,
+            //   onPress: () => {
+            //     openMetaMaskTestDapp();
+            //   },
+            // },
+            {
+              label: 'Markdown Webview Test',
+              icon: RcEarth,
+              onPress: () => {
+                viewMarkdownInWebView();
+              },
+            },
+            {
+              label: 'ProviderController Test',
+              icon: RcEarth,
+              onPress: () => {
+                navigation.push(RootNames.StackSettings, {
+                  screen: RootNames.ProviderControllerTester,
+                });
+              },
+            },
+            {
+              label: 'Test Authentication Modal',
+              icon: isFaceID ? RcFaceId : RcFingerprint,
+              onPress: () => {
+                AuthenticationModal2024.show({
+                  title: 'Test Authentication Modal',
+                  authType: ['biometrics', 'password'],
+                  // authType: ['password'],
+                  onFinished: ctx => {
+                    toast.show(JSON.stringify(ctx, null, 2));
+                  },
+                  onCancel: () => {
+                    toast.show(
+                      'Canceled, But this handler has beed deprecated',
+                    );
+                  },
+                });
+              },
+            },
+            {
+              label: 'View Rabby Genesis NFT Detail',
+              icon: RcInfo,
+              onPress: () => {
+                navigation.push(RootNames.StackTransaction, {
+                  screen: RootNames.SendNFT,
+                  params: {
+                    nftItem: RABBY_GENESIS_NFT_DATA.nftToken,
+                    fromAccount: currentAccount!,
+                  },
+                });
+              },
+            },
+            {
+              label: 'Test EIP-7702',
+              icon: RcInfo,
+              onPress: () => {
+                sendRequest({
+                  data: {
+                    method: 'eth_sendTransaction',
+                    params: [
+                      {
+                        from: '0x5853eD4f26A3fceA565b3FBC698bb19cdF6DEB85',
+                        to: '0x093ccbaecb0e0006c8bffca92e9929d117fec583',
+                        value: '0x0',
+                        data: '0x13af40350000000000000000000000007c754e12423bc46a2120303ad239b955ccb94f1a',
+                        chainId: 1,
+                        authorizationList: [],
+                      },
+                    ],
+                  },
+                  session: INTERNAL_REQUEST_SESSION,
+                  account: currentAccount!,
+                });
+              },
+            },
+            {
+              label: 'Test OFAC Blocked Transaction',
+              icon: RcInfo,
+              onPress: () => {
+                sendRequest({
+                  data: {
+                    method: 'eth_sendTransaction',
+                    params: [
+                      {
+                        from: '0x5853eD4f26A3fceA565b3FBC698bb19cdF6DEB85',
+                        to: '0xe7aa314c77f4233c18c6cc84384a9247c0cf367b',
+                        value: '0x0',
+                        data: '0x',
+                        chainId: 1,
+                      },
+                    ],
+                  },
+                  session: INTERNAL_REQUEST_SESSION,
+                  account: currentAccount!,
+                });
+              },
+            },
+          ],
+        },
+      }),
+    };
+  })();
+
+  return (
+    <>
+      {Object.entries(devSettingsBlocks).map(([key, block], idx) => {
+        const l1key = `${key}-${idx}`;
+
+        return (
+          <Block
+            key={l1key}
+            label={block.label}
+            style={[
+              {
+                marginTop: 16,
+              },
+            ]}>
+            {block.items.map((item, idx_l2) => {
+              return (
+                <Block.Item
+                  key={`${l1key}-${item.label}-${idx_l2}`}
+                  {...item}
+                />
+              );
+            })}
+          </Block>
+        );
+      })}
+
+      <DevForceLocalVersionSelector />
+      <InnerDappPreloadStrategySelector />
+
+      <WalletLockTestItemModal />
+      <DevUIPlaygroundModal />
+      <DevDataPlayground />
+      <DevCapabilityPlaygroundModal />
+      <DevModalDevServer />
+      <OpenApiPopup
+        visible={isShowOpenApiPopup}
+        onClose={() => {
+          setIsShowOpenApiPopup(false);
+        }}
+      />
+    </>
+  );
+}
+
+export default function SettingsScreen(): JSX.Element {
+  const { styles } = useTheme2024({ getStyle: getStyles });
+  const { rabbitCode } = useAppSecurityChain();
+  const rabbitCodeLen = rabbitCode?.length ?? null;
+  const handleShowBuildInfo = useCallback(() => {
+    AlertBuildInfo({ rabbitCodeLen });
+  }, [rabbitCodeLen]);
+
+  useFocusEffect(
+    useCallback(() => {
+      storeApisBiometrics.fetchBiometrics();
+    }, []),
+  );
+
+  const { safeSizes } = useSafeAndroidBottomSizes({
+    containerPaddingBottom: 0,
+  });
+
+  const { bottom } = useSafeAreaInsets();
+
+  const { handlePress } = useMultiPress({ onMultiPress: handleShowBuildInfo });
+
+  return (
+    <RootScreenContainer
+      fitStatuBar
+      hideBottomBar
+      style={[
+        styles.container,
+        {
+          paddingBottom: safeSizes.containerPaddingBottom,
+        },
+      ]}>
+      <ScreenSpecificStatusBar screenName={RootNames.Settings} />
+      <ScrollView
+        style={[styles.scrollableView]}
+        contentContainerStyle={[
+          styles.scrollableContentStyle,
+          { paddingBottom: 12 + bottom },
+        ]}>
+        <SettingsBlocks />
+        {NEED_DEVSETTINGBLOCKS && (
+          <DevSettingsBlocks onShowBuildInfo={handleShowBuildInfo} />
+        )}
+        <TouchableOpacity onPress={handlePress} activeOpacity={1}>
+          <View style={[styles.bottomFooter]}>
+            <RcFooterLogo />
+          </View>
+        </TouchableOpacity>
+      </ScrollView>
+
+      <ThemeSelectorModal />
+
+      <ManagePasswordSheetModal height={422} />
+      {NEED_DEVSETTINGBLOCKS && <ResetPasswordAndKeyringsSheetModal />}
+
+      <SheetWebViewTester />
+    </RootScreenContainer>
+  );
+}
+
+const getStyles = createGetStyles2024(ctx => {
+  return {
+    container: {
+      position: 'relative',
+      flex: 0,
+      flexDirection: 'column',
+      height: '100%',
+      backgroundColor: ctx.isLight
+        ? ctx.classicalColors['neutral-bg-2']
+        : ctx.colors2024['neutral-bg-1'],
+      // paddingBottom: LAYOUTS.fiexedFooterHeight,
+    },
+    scrollableContentStyle: {
+      paddingHorizontal: 20,
+      width: '100%',
+      paddingBottom: 12,
+    },
+    scrollableView: {
+      marginBottom: 0,
+      height: '100%',
+      flexShrink: 1,
+      // ...makeDebugBorder('yellow'),
+    },
+    bottomFooter: {
+      flexShrink: 0,
+      // position: 'absolute',
+      // bottom: 0,
+      // left: 0,
+      // right: 0,
+      width: '100%',
+      paddingHorizontal: 20,
+      height: LAYOUTS.fiexedFooterHeight,
+      alignItems: 'center',
+      justifyContent: 'center',
+      // ...makeDebugBorder(),
+    },
+    rightText: {
+      color: ctx.colors2024['neutral-secondary'],
+      fontFamily: 'SF Pro Rounded',
+      fontSize: 16,
+      fontStyle: 'normal',
+      fontWeight: '500',
+      lineHeight: 20,
+    },
+  };
+});

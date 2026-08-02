@@ -1,0 +1,30 @@
+pluginManagement { includeBuild("../node_modules/@react-native/gradle-plugin") }
+plugins { id("com.facebook.react.settings") }
+extensions.configure(com.facebook.react.ReactSettingsExtension){ ex -> ex.autolinkLibrariesFromCommand() }
+rootProject.name = 'RabbyMobile'
+include ':app'
+includeBuild('../node_modules/@react-native/gradle-plugin')
+
+// include ':@react-native-firebase_analytics'
+// project(':@react-native-firebase_analytics').projectDir = new File(rootProject.projectDir, '../node_modules/@react-native-firebase/analytics/android')
+
+// include ':@react-native-firebase_messaging'
+// project(':@react-native-firebase_messaging').projectDir = new File(rootProject.projectDir, '../node_modules/@react-native-firebase/messaging/android')
+
+/* if you want to compile ReactNativeAndroid from source, uncomment the following lines :start */
+// includeBuild('../node_modules/react-native') {
+//     dependencySubstitution {
+//         substitute(module("com.facebook.react:react-android")).using(project(":packages:react-native:ReactAndroid"))
+//         substitute(module("com.facebook.react:react-native")).using(project(":packages:react-native:ReactAndroid"))
+//         substitute(module("com.facebook.react:hermes-android")).using(project(":packages:react-native:ReactAndroid:hermes-engine"))
+//         substitute(module("com.facebook.react:hermes-engine")).using(project(":packages:react-native:ReactAndroid:hermes-engine"))
+//     }
+// }
+/* if you want to compile ReactNativeAndroid from source, uncomment the following lines :end */
+
+
+// include ':isudaji_react-native-install-apk'
+// project(':isudaji_react-native-install-apk').projectDir = new File(rootProject.projectDir, 	'../node_modules/@isudaji/react-native-install-apk/android')
+
+// include ':@onekeyfe_react-native-ble-plx'
+// project(':@onekeyfe_react-native-ble-plx').projectDir = new File(rootProject.projectDir, '../node_modules/@onekeyfe/react-native-ble-plx/android')

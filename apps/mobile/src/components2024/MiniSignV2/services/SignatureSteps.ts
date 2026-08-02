@@ -1,0 +1,1243 @@
+import BigNumber from 'bignumber.js';
+import { findChain, isTestnet } from '@/utils/chain';
+import {
+  calcMaxPriorityFee,
+  checkGasAndNonce,
+  convertLegacyTo1559,
+} from '@/utils/transaction';
+
+import type {
+  ParsedTransactionActionData,
+  ActionRequireData,
+} from '@rabby-wallet/rabby-action';
+import {
+  parseAction,
+  fetchActionRequiredData,
+  formatSecurityEngineContext,
+} from '@rabby-wallet/rabby-action';
+import type { Result } from '@rabby-wallet/rabby-security-engine';
+
+import type { OpenApiService } from '@rabby-wallet/rabby-api';
+import type {
+  GasLevel,
+  MultiAction,
+  Tx,
+} from '@rabby-wallet/rabby-api/dist/types';
+import type {
+  CalcItem,
+  GasSelectionOptions,
+  PreparedContext,
+  SecurityResult,
+  SendOptions,
+  SignerConfig,
+} from '../domain/types';
+import type { Account } from '@/core/startupServices/preference';
+import { intToHex } from '@/utils/number';
+import {
+  explainGas,
+  getGasTokenBalance,
+  getRecommendGas,
+  getRecommendNonce,
+} from '@/components/Approval/components/SignTx/calc';
+import { INTERNAL_REQUEST_ORIGIN } from '@/constant';
+import { getCexInfo } from '@/hooks/useCexSupportList';
+import { ALIAS_ADDRESS, CAN_ESTIMATE_L1_FEE_CHAINS } from '@/constant/gas';
+import { getTimeSpan } from '@/utils/time';
+import {
+  computeCustomGasPrice,
+  selectInitialGas,
+} from '../domain/gasSelection';
+import { SUPPORT_1559_KEYRING_TYPE } from '@/constant/tx';
+import { normalizeTxParams } from '@/components/Approval/components/SignTx/util';
+import type { BlockInfo } from '@/core/apis/transactions';
+import { calcGasLimit } from '@/core/apis/transactions';
+import {
+  FailedCode,
+  sendTransactionByMiniSignV2 as sendTransaction,
+} from '@/utils/sendTransaction';
+import { isLedgerLockError } from '@/utils/ledger';
+import type { SignerCtx } from '../domain/ctx';
+import { buildFingerprint } from '../domain/ctx';
+import { openapi, testOpenapi } from '@/core/request';
+import { keyringServiceApi } from '@/core/serviceApi/keyring';
+import { gasAccountServiceApi } from '@/core/serviceApi/gasAccount';
+import { transactionHistoryServiceApi } from '@/core/serviceApi/transactionHistory';
+import { whitelistServiceApi } from '@/core/serviceApi/whitelist';
+import { apiCustomRPC, apiKeyring, apiProvider } from '@/core/apis';
+import { customRPCServiceApi } from '@/core/serviceApi/customRPC';
+import { executeSecurityEngine } from '@/core/apis/securityEngine';
+import { apisTransactionHistory } from '@/core/apis/transactionHistory';
+import { miscServiceApi } from '@/core/serviceApi/misc';
+import {
+  getRetryTxRecommendNonce,
+  getRetryTxType,
+  retryTxReset,
+  setRetryTxRecommendNonce,
+} from '@/utils/errorTxRetry';
+import { t } from 'i18next';
+import { requestETHRpc } from '@/core/apis/provider';
+import type { TxWithTempoExtras } from '@/utils/tempo';
+import {
+  buildTempoTransaction,
+  isTempoBatchSupportedAccountType,
+  isTempoChain,
+  shouldUseTempoTransaction,
+  toTempoCallsTx,
+} from '@/utils/tempo';
+import { resolveMiniSignSubmitGasMode } from '../state/gasPaymentState';
+import { shouldAutoSwitchToApprovalGasAccount } from '@/components/Approval/components/TxComponents/GasSelector/approvalGasDisplay';
+
+const pickTempoTxFields = (tx: TxWithTempoExtras<Tx>) => ({
+  type: tx.type,
+  calls: tx.calls,
+  feeToken: tx.feeToken,
+  feePayer: tx.feePayer,
+  feePayerSignature: tx.feePayerSignature,
+  nonceKey: tx.nonceKey,
+  keyAuthorization: tx.keyAuthorization,
+  validBefore: tx.validBefore,
+  validAfter: tx.validAfter,
+});
+
+const buildMiniSignPreExecTx = (params: {
+  tx: TxWithTempoExtras<Tx>;
+  chainId: number;
+  chainServerId: string;
+  gas: string;
+  nonce: string;
+  gasPrice: string;
+  is1559Capable: boolean;
+  maxPriorityFee: number;
+  accountType?: string | null;
+}) => {
+  const {
+    tx,
+    chainId,
+    chainServerId,
+    gas,
+    nonce,
+    gasPrice,
+    is1559Capable,
+    maxPriorityFee,
+    accountType,
+  } = params;
+  const shouldUseTempoTx = shouldUseTempoTransaction({
+    tx: tx as unknown as Record<string, unknown>,
+    chainServerId,
+    accountType,
+  });
+  const buildTxBase: TxWithTempoExtras<Tx> = {
+    chainId,
+    data: tx.data || '0x',
+    from: tx.from,
+    gas,
+    nonce,
+    to: tx.to,
+    value: tx.value,
+    gasPrice,
+    ...(shouldUseTempoTx ? pickTempoTxFields(tx) : {}),
+  };
+
+  let buildTx = buildTxBase;
+  if (is1559Capable) {
+    buildTx = {
+      ...(convertLegacyTo1559(buildTxBase) as TxWithTempoExtras<Tx>),
+      ...(shouldUseTempoTx ? pickTempoTxFields(tx) : {}),
+    };
+    buildTx.maxPriorityFeePerGas =
+      maxPriorityFee < 0
+        ? buildTx.maxFeePerGas
+        : intToHex(Math.round(maxPriorityFee));
+  }
+
+  return shouldUseTempoTx
+    ? (buildTempoTransaction(buildTx as any, {
+        stripTopLevelData: true,
+      }) as unknown as TxWithTempoExtras<Tx>)
+    : buildTx;
+};
+
+const buildHistoryGasUsedTx = (
+  tx: TxWithTempoExtras<Tx>,
+  accountType?: string | null,
+) => {
+  const shouldUseTempoTx = shouldUseTempoTransaction({
+    tx: tx as unknown as Record<string, unknown>,
+    chainServerId: findChain({ id: tx.chainId })?.serverId,
+    accountType,
+  });
+
+  if (shouldUseTempoTx) {
+    return {
+      ...tx,
+      nonce: tx.nonce || '0x1',
+      gas: tx.gas || '',
+    };
+  }
+
+  return {
+    ...tx,
+    nonce: tx.nonce || '0x1',
+    data: tx.data,
+    value: tx.value || '0x0',
+    gas: tx.gas || '',
+  };
+};
+
+const rawAmountToBn = (
+  value: string | number | BigNumber | null | undefined,
+) => {
+  if (BigNumber.isBigNumber(value)) {
+    return value;
+  }
+  return new BigNumber(value || 0);
+};
+
+async function recomputeExplainForCalcItems(params: {
+  chainId: number;
+  is1559Capable: boolean;
+  gasList: GasLevel[];
+  txsCalc: CalcItem[];
+  newGas: GasLevel;
+  account: Account;
+  gasTokenDecimals?: number;
+}): Promise<CalcItem[]> {
+  const {
+    chainId,
+    is1559Capable,
+    gasList,
+    txsCalc,
+    newGas,
+    account,
+    gasTokenDecimals = 18,
+  } = params;
+  const chain = findChain({ id: chainId })!;
+  const maxPriorityFee = calcMaxPriorityFee(
+    gasList as any,
+    newGas as any,
+    chain.id,
+    true,
+  );
+  const nextCalc: CalcItem[] = await Promise.all(
+    txsCalc.map(async item => {
+      const newTx = { ...item.tx } as any;
+      if (is1559Capable) {
+        newTx.maxFeePerGas = intToHex(Math.round(newGas.price));
+        newTx.maxPriorityFeePerGas =
+          maxPriorityFee < 0
+            ? newTx.maxFeePerGas
+            : intToHex(Math.round(maxPriorityFee));
+        delete newTx.gasPrice;
+      } else {
+        newTx.gasPrice = intToHex(Math.round(newGas.price));
+        delete newTx.maxFeePerGas;
+        delete newTx.maxPriorityFeePerGas;
+      }
+      const gasCost = await explainGas({
+        gasUsed: item.gasUsed || 0,
+        gasPrice: newGas.price,
+        chainId: chain.id,
+        nativeTokenPrice: item.preExecResult?.native_token?.price || 0,
+        tx: newTx,
+        gasLimit: item.gasLimit,
+        account,
+        gasTokenDecimals,
+      });
+      return { ...item, tx: newTx, gasCost } as CalcItem;
+    }),
+  );
+  return nextCalc;
+}
+
+async function computeGasless(params: {
+  txsCalc: CalcItem[];
+  gasPriceWei: number;
+}): Promise<ReturnType<OpenApiService['gasLessTxsCheck']>> {
+  const { txsCalc, gasPriceWei } = params;
+  try {
+    const res = await openapi.gasLessTxsCheck({
+      tx_list: txsCalc.map(i => ({
+        ...i.tx,
+        gas: i.gasLimit,
+        gasPrice: intToHex(Math.round(gasPriceWei)),
+      })),
+    });
+    return res;
+  } catch {
+    return { is_gasless: false };
+  }
+}
+
+async function computeGasAccount(params: {
+  txsCalc: CalcItem[];
+  accountType?: string | null;
+}): Promise<PreparedContext['gasAccount'] | undefined> {
+  const { txsCalc, accountType } = params;
+  try {
+    if (!txsCalc.length) return undefined;
+    const sig = await gasAccountServiceApi.getGasAccountSig();
+    const chain = findChain({ id: txsCalc[0]?.tx.chainId })!;
+    const res = await openapi.checkGasAccountTxs({
+      sig: sig.sig || '',
+      account_id: sig.accountId || txsCalc[0].tx.from,
+      tx_list: txsCalc.map(i =>
+        isTempoChain(chain.serverId) &&
+        isTempoBatchSupportedAccountType(accountType)
+          ? (toTempoCallsTx(i.tx as any, { stripTopLevelData: true }) as any)
+          : i.tx,
+      ),
+    });
+    return res as any;
+  } catch (e) {
+    console.log('error', e);
+    return undefined;
+  }
+}
+
+function aggregateCheckErrors(params: {
+  txsCalc: CalcItem[];
+  nativeTokenBalance?: string;
+  gasTokenDecimals?: number;
+  gasTokenId?: string;
+  checkTxValueInBalance?: boolean;
+}): PreparedContext['checkErrors'] {
+  const {
+    txsCalc,
+    nativeTokenBalance,
+    gasTokenDecimals = 18,
+    gasTokenId,
+    checkTxValueInBalance = true,
+  } = params;
+  let checkErrors: PreparedContext['checkErrors'] = [];
+  if (!txsCalc.length) return checkErrors;
+  let balanceLeft = nativeTokenBalance || '0';
+  for (const item of txsCalc) {
+    const errs = checkGasAndNonce({
+      recommendGasLimitRatio: item.recommendGasLimitRatio,
+      recommendGasLimit: item.gasLimit,
+      recommendNonce: item.tx.nonce!,
+      tx: item.tx,
+      gasLimit: item.gasLimit,
+      nonce: item.tx.nonce!,
+      isCancel: false,
+      gasExplainResponse: item.gasCost,
+      isSpeedUp: false,
+      isGnosisAccount: false,
+      nativeTokenBalance: balanceLeft,
+      gasTokenDecimals,
+      gasTokenId,
+      checkTxValueInBalance,
+    });
+    checkErrors = [...checkErrors, ...errs];
+    const txValueRaw = checkTxValueInBalance
+      ? rawAmountToBn(item.tx.value || 0)
+      : new BigNumber(0);
+    balanceLeft = new BigNumber(balanceLeft)
+      .minus(txValueRaw)
+      .minus(new BigNumber(item.gasCost.maxGasCostRawAmount || 0))
+      .toFixed();
+  }
+  return checkErrors;
+}
+
+let retryTxs = [] as Tx[];
+
+export class SignatureSteps {
+  static async getSecurityEngineResults(params: {
+    account: Account;
+    chainId: number;
+    last: CalcItem;
+  }): Promise<SecurityResult | undefined> {
+    const { account, chainId, last } = params;
+    const chain = findChain({ id: chainId })!;
+    try {
+      const actionResp = await openapi.parseTx({
+        chainId: chain.serverId,
+        tx: {
+          ...last.tx,
+          gas: '0x0',
+          nonce: last.tx.nonce || '0x1',
+          value: last.tx.value || '0x0',
+        } as any,
+        origin: INTERNAL_REQUEST_ORIGIN,
+        addr: account.address,
+      });
+
+      let parsedTransactionActionData: ParsedTransactionActionData;
+      let actionRequireData: ActionRequireData;
+      let parsedTransactionActionDataList:
+        | ParsedTransactionActionData[]
+        | undefined = undefined;
+      let actionRequireDataList: ActionRequireData[] | undefined = undefined;
+      let engineResultList: Result[][] | undefined = undefined;
+      let engineResult: Result[] = [];
+
+      if (actionResp?.action?.type === 'multi_actions') {
+        const actions = actionResp.action.data as MultiAction;
+        const tx = last.tx;
+        const res = last.preExecResult;
+        parsedTransactionActionDataList = actions.map(action =>
+          parseAction({
+            type: 'transaction',
+            data: action,
+            balanceChange: res.balance_change,
+            tx: {
+              ...tx,
+              gas: '0x0',
+              nonce: tx.nonce || '0x1',
+              value: tx.value || '0x0',
+            },
+            preExecVersion: res.pre_exec_version,
+            gasUsed: res.gas.gas_used,
+            sender: tx.from,
+          }),
+        );
+        actionRequireDataList = await Promise.all(
+          parsedTransactionActionDataList.map(async item => {
+            const cexInfo = await getCexInfo(item.send?.to || '');
+            return fetchActionRequiredData({
+              type: 'transaction',
+              actionData: item,
+              contractCall: actionResp.contract_call,
+              chainId: chain.serverId,
+              sender: account.address,
+              walletProvider: {
+                ethRpc: requestETHRpc,
+                hasPrivateKeyInWallet: apiKeyring.hasPrivateKeyInWallet,
+                hasAddress: address => keyringServiceApi.hasAddress(address),
+                getWhitelist: async () => whitelistServiceApi.getWhitelist(),
+                isWhitelistEnabled: async () =>
+                  whitelistServiceApi.isWhitelistEnabled(),
+                getPendingTxsByNonce: async (...args) =>
+                  transactionHistoryServiceApi.getPendingTxsByNonce(...args),
+                findChain,
+                ALIAS_ADDRESS,
+              },
+              cex: cexInfo,
+              tx: {
+                ...tx,
+                gas: '0x0',
+                nonce: tx.nonce || '0x1',
+                value: tx.value || '0x0',
+              },
+              apiProvider: isTestnet(chain.serverId) ? testOpenapi : openapi,
+            });
+          }),
+        );
+        const ctxList = await Promise.all(
+          actionRequireDataList.map((requireData, index) => {
+            return formatSecurityEngineContext({
+              type: 'transaction',
+              actionData: parsedTransactionActionDataList![index],
+              requireData,
+              chainId: chain.serverId,
+              isTestnet: isTestnet(chain.serverId),
+              provider: {
+                getTimeSpan,
+                hasAddress: address => keyringServiceApi.hasAddress(address),
+              },
+            });
+          }),
+        );
+        engineResultList = await Promise.all(
+          ctxList.map(ctx => executeSecurityEngine(ctx)),
+        );
+        parsedTransactionActionData = parsedTransactionActionDataList[0];
+        actionRequireData = actionRequireDataList[0];
+      } else {
+        parsedTransactionActionData = parseAction({
+          type: 'transaction',
+          data: actionResp.action,
+          balanceChange: last.preExecResult.balance_change,
+          tx: { ...last.tx, gas: '0x0' },
+          preExecVersion: last.preExecResult.pre_exec_version,
+          gasUsed: last.preExecResult.gas.gas_used,
+          sender: last.tx.from,
+        });
+        actionRequireData = await fetchActionRequiredData({
+          type: 'transaction',
+          actionData: parsedTransactionActionData,
+          contractCall: actionResp.contract_call,
+          chainId: chain.serverId,
+          sender: account.address,
+          walletProvider: {
+            ethRpc: requestETHRpc,
+            hasPrivateKeyInWallet: apiKeyring.hasPrivateKeyInWallet,
+            hasAddress: address => keyringServiceApi.hasAddress(address),
+            getWhitelist: async () => whitelistServiceApi.getWhitelist(),
+            isWhitelistEnabled: async () =>
+              whitelistServiceApi.isWhitelistEnabled(),
+            getPendingTxsByNonce: async (...args) =>
+              transactionHistoryServiceApi.getPendingTxsByNonce(...args),
+            findChain,
+            ALIAS_ADDRESS,
+          },
+          tx: { ...last.tx, gas: '0x0' },
+          apiProvider: isTestnet(chain.serverId) ? testOpenapi : openapi,
+        });
+        const ctx = await formatSecurityEngineContext({
+          type: 'transaction',
+          actionData: parsedTransactionActionData,
+          requireData: actionRequireData,
+          chainId: chain.serverId,
+          isTestnet: isTestnet(chain.serverId),
+          provider: {
+            getTimeSpan,
+            hasAddress: address => keyringServiceApi.hasAddress(address),
+          },
+        });
+        engineResult = await executeSecurityEngine(ctx);
+      }
+      return {
+        parsedTransactionActionData,
+        actionRequireData,
+        engineResult,
+        parsedTransactionActionDataList,
+        actionRequireDataList,
+        engineResultList,
+      };
+    } catch (e) {
+      console.log('engineResults error', e);
+      return undefined;
+    }
+  }
+
+  static async prepareContext(params: {
+    account: Account;
+    txs: Tx[];
+    enableSecurityEngine?: boolean;
+    gasSelection?: GasSelectionOptions;
+    config?: SignerConfig;
+  }): Promise<PreparedContext> {
+    const { txs, enableSecurityEngine, gasSelection, config } = params;
+    const account = config?.account!;
+
+    const chainId = txs[0].chainId;
+    const chain = findChain({ id: chainId })!;
+    const customGasPrice = computeCustomGasPrice({
+      txs,
+      flags: gasSelection?.flags,
+      lastSelection: gasSelection?.lastSelection,
+    });
+
+    const preparedBlock = requestETHRpc<BlockInfo>(
+      {
+        method: 'eth_getBlockByNumber',
+        params: ['latest', false],
+      },
+      chain.serverId,
+      account,
+    );
+
+    const [
+      _,
+      gasList,
+      { median: gasPriceMedian },
+      gasTokenBalanceInfo,
+      hasCustomChainRPC,
+      baseRecommendNonce,
+    ] = await Promise.all([
+      customRPCServiceApi.syncDefaultRPC().catch(() => {}),
+      apiProvider.gasMarketV2(
+        {
+          chain,
+          tx: txs[0],
+          customGas: customGasPrice > 0 ? customGasPrice : undefined,
+        },
+        account,
+      ),
+      openapi.gasPriceStats(chain.serverId),
+      getGasTokenBalance({
+        chainId: chain.id,
+        address: account.address,
+        account: account,
+      }),
+      apiCustomRPC.hasCustomRPC(chain.enum),
+      // base nonce for the batch (align with MiniSignTx)
+      getRecommendNonce({
+        tx: txs[0],
+        chainId: chain.id,
+        account,
+      }),
+    ]);
+
+    const nativeTokenBalance = gasTokenBalanceInfo.rawBalance;
+    const gasToken = gasTokenBalanceInfo.token;
+    const gasTokenDecimals = gasToken.decimals || 18;
+    const checkTxValueInBalance = !isTempoChain(chain.serverId);
+
+    const noCustomRPC = !hasCustomChainRPC;
+
+    const selectedGas = selectInitialGas({
+      gasList,
+      flags: gasSelection?.flags,
+      lastSelection: gasSelection?.lastSelection,
+      customGasPrice,
+    });
+
+    let nativeTokenPrice: number | undefined = undefined;
+    const is1559Capable = !!(
+      chain.eip?.['1559'] &&
+      (!account.type || SUPPORT_1559_KEYRING_TYPE.includes(account.type as any))
+    );
+    const maxPriorityFee = calcMaxPriorityFee(
+      gasList as any,
+      selectedGas as any,
+      chain.id,
+      false,
+    );
+
+    const tempTxs: TxWithTempoExtras<Tx>[] = txs.map((e, index) => {
+      const normalizedTx = normalizeTxParams(e);
+      return buildMiniSignPreExecTx({
+        tx: {
+          ...normalizedTx,
+          ...pickTempoTxFields(e as TxWithTempoExtras<Tx>),
+        } as TxWithTempoExtras<Tx>,
+        chainId,
+        chainServerId: chain.serverId,
+        gas: normalizedTx.gas || e.gasLimit || '',
+        nonce:
+          normalizedTx.nonce ||
+          intToHex(new BigNumber(baseRecommendNonce).plus(index).toNumber()),
+        gasPrice: intToHex(selectedGas.price),
+        is1559Capable,
+        maxPriorityFee,
+        accountType: account.type,
+      });
+    });
+
+    const pending_tx_list_promise = apisTransactionHistory.getPendingTxs({
+      recommendNonce: baseRecommendNonce,
+      address: account.address,
+      chainId: txs[0].chainId,
+    });
+
+    const preExecProcess = async (index: number) => {
+      const buildTx = tempTxs[index];
+
+      const preparedHistoryGasUsed = openapi.historyGasUsed({
+        tx: buildHistoryGasUsedTx(buildTx, account.type) as any,
+        user_addr: buildTx.from,
+      });
+
+      const preExecResult = await openapi.preExecTx({
+        tx: buildTx,
+        origin: INTERNAL_REQUEST_ORIGIN,
+        address: account.address,
+        updateNonce: true,
+        pending_tx_list: [
+          ...(await pending_tx_list_promise),
+          ...tempTxs.slice(0, index),
+        ],
+      });
+
+      let estimateGas = 0;
+      if (preExecResult.gas.success) {
+        estimateGas = preExecResult.gas.gas_limit || preExecResult.gas.gas_used;
+      }
+
+      const {
+        gas: gasRaw,
+        needRatio,
+        gasUsed,
+      } = await getRecommendGas({
+        gasUsed: preExecResult.gas.gas_used,
+        gas: estimateGas,
+        tx: buildTx,
+        chainId: chain.id,
+        preparedHistoryGasUsed,
+      });
+      const gas = new BigNumber(gasRaw);
+
+      let gasLimit = (buildTx as any).gas || (buildTx as any).gasLimit;
+      let recommendGasLimitRatio = 1;
+      if (!gasLimit) {
+        const { gasLimit: _gl, recommendGasLimitRatio: _ratio } =
+          await calcGasLimit({
+            chain,
+            tx: buildTx,
+            gas,
+            selectedGas,
+            nativeTokenBalance,
+            explainTx: preExecResult,
+            needRatio,
+            account,
+            preparedBlock,
+            gasTokenDecimals,
+            checkTxValueInBalance,
+          });
+        gasLimit = _gl;
+        recommendGasLimitRatio = _ratio;
+      }
+      let L1feePromises;
+
+      if (CAN_ESTIMATE_L1_FEE_CHAINS.includes(chain.enum)) {
+        L1feePromises = apiProvider.fetchEstimatedL1Fee(
+          {
+            txParams: { ...buildTx, gas: buildTx?.gas || gasLimit } as Tx,
+            account,
+          },
+          chain.enum,
+        );
+      }
+
+      const gasCost = await explainGas({
+        gasUsed,
+        gasPrice: selectedGas.price,
+        chainId: chain.id,
+        nativeTokenPrice: preExecResult.native_token.price,
+        tx: buildTx,
+        gasLimit,
+        account,
+        preparedL1Fee: L1feePromises,
+        gasTokenDecimals,
+      });
+
+      nativeTokenPrice = preExecResult.native_token.price;
+      const finalTx = { ...buildTx, gas: gasLimit } as TxWithTempoExtras<Tx>;
+      return {
+        tx: finalTx,
+        gasUsed,
+        gasLimit: gasLimit!,
+        recommendGasLimitRatio,
+        gasCost,
+        preExecResult,
+        L1feeCache: L1feePromises ? await L1feePromises : undefined,
+      };
+    };
+
+    const txsCalc = await Promise.all(
+      txs.map((_, index) => preExecProcess(index)),
+    );
+
+    if (config?.onPreExecChange && txsCalc.length) {
+      config?.onPreExecChange(txsCalc[txsCalc.length - 1].preExecResult);
+    }
+
+    const gaslessTask = computeGasless({
+      txsCalc,
+      gasPriceWei: selectedGas.price,
+    });
+    const gasAccountTask = computeGasAccount({
+      txsCalc,
+      accountType: account.type,
+    });
+    const selectedGasCostTask = SignatureSteps.computeGasCost({
+      account,
+      chainId: chain.id,
+      txsCalc,
+      price: selectedGas.price,
+      gasTokenDecimals,
+    });
+    const engineResultsTask: Promise<SecurityResult | undefined> =
+      enableSecurityEngine && txsCalc.length
+        ? SignatureSteps.getSecurityEngineResults({
+            account,
+            chainId: chain.id,
+            last: txsCalc[txsCalc.length - 1],
+          })
+        : Promise.resolve(undefined);
+
+    // align with MiniSignTx: aggregate checkErrors across batch with running balance
+    const checkErrors = aggregateCheckErrors({
+      txsCalc,
+      nativeTokenBalance,
+      gasTokenDecimals,
+      gasTokenId: gasToken?.tokenId,
+      checkTxValueInBalance,
+    });
+    const isGasNotEnough = !!checkErrors?.some(e => e.code === 3001);
+
+    const [gasless, gasAccount, selectedGasCost, engineResults] =
+      await Promise.all([
+        gaslessTask,
+        gasAccountTask,
+        selectedGasCostTask,
+        engineResultsTask,
+      ]);
+
+    return {
+      chainId: chain.id,
+      is1559: !!chain.eip?.['1559'],
+      gasList,
+      selectedGas,
+      selectedGasCost,
+      txsCalc,
+      nativeTokenPrice,
+      nativeTokenBalance,
+      gasToken,
+      checkErrors,
+      gasless,
+      gasAccount,
+      engineResults,
+      isGasNotEnough,
+      noCustomRPC,
+      gasPriceMedian,
+    };
+  }
+
+  static async refreshOnGasChange(params: {
+    account: Account;
+    chainId: number;
+    is1559Capable: boolean;
+    gasList: GasLevel[];
+    txsCalc: CalcItem[];
+    newGas: GasLevel;
+    nativeTokenBalance?: string;
+    gasToken?: PreparedContext['gasToken'];
+  }): Promise<
+    Pick<
+      PreparedContext,
+      | 'txsCalc'
+      | 'checkErrors'
+      | 'gasless'
+      | 'gasAccount'
+      | 'gasList'
+      | 'isGasNotEnough'
+      | 'selectedGasCost'
+    >
+  > {
+    const {
+      account,
+      chainId,
+      is1559Capable,
+      gasList,
+      txsCalc,
+      newGas,
+      nativeTokenBalance,
+      gasToken,
+    } = params;
+    const chain = findChain({ id: chainId })!;
+    const gasTokenDecimals = gasToken?.decimals || 18;
+    const checkTxValueInBalance = !isTempoChain(chain.serverId);
+    const maxPriorityFee = calcMaxPriorityFee(
+      gasList as any,
+      newGas as any,
+      chain.id,
+      true,
+    );
+    let newGasList = gasList;
+    if (newGas.level === 'custom') {
+      newGasList = (gasList || []).map(item => {
+        if (item.level === 'custom') return newGas;
+        return item;
+      });
+    }
+
+    const nextCalc: CalcItem[] = await recomputeExplainForCalcItems({
+      chainId,
+      is1559Capable,
+      gasList,
+      txsCalc,
+      newGas,
+      account,
+      gasTokenDecimals,
+    });
+
+    const [gasless, gasAccount] = await Promise.all([
+      computeGasless({ txsCalc: nextCalc, gasPriceWei: newGas.price }),
+      computeGasAccount({
+        txsCalc: nextCalc,
+        accountType: account.type,
+      }),
+    ]);
+
+    // lightweight re-validation: recompute gas warnings using cached balance
+    const checkErrors = aggregateCheckErrors({
+      txsCalc: nextCalc,
+      nativeTokenBalance,
+      gasTokenDecimals,
+      checkTxValueInBalance,
+    });
+    const isGasNotEnough = !!checkErrors?.some(e => e.code === 3001);
+
+    const selectedGasCost = await SignatureSteps.computeGasCost({
+      account,
+      chainId: chain.id,
+      txsCalc: nextCalc,
+      price: newGas.price,
+      gasTokenDecimals,
+    });
+
+    return {
+      txsCalc: nextCalc,
+      checkErrors,
+      gasless,
+      gasAccount,
+      gasList: newGasList,
+      isGasNotEnough,
+      selectedGasCost,
+    };
+  }
+
+  static async computeGasCost(params: {
+    account: Account;
+    chainId: number;
+    txsCalc: CalcItem[];
+    price: string | number;
+    gasTokenDecimals?: number;
+  }): Promise<{
+    gasCostUsd: BigNumber;
+    gasCostAmount: BigNumber;
+    maxGasCostAmount: BigNumber;
+    gasCostRawAmount: BigNumber;
+    maxGasCostRawAmount: BigNumber;
+  }> {
+    const { account, chainId, txsCalc, price, gasTokenDecimals = 18 } = params;
+    const res = await Promise.all(
+      txsCalc.map(item =>
+        explainGas({
+          gasUsed: item.gasUsed,
+          gasPrice: price,
+          chainId,
+          nativeTokenPrice: item.preExecResult.native_token.price || 0,
+          tx: item.tx,
+          gasLimit: item.gasLimit,
+          account: account,
+          gasTokenDecimals,
+        }),
+      ),
+    );
+    const totalCost = res.reduce(
+      (sum, item) => {
+        sum.gasCostAmount = sum.gasCostAmount.plus(item.gasCostAmount);
+        sum.gasCostUsd = sum.gasCostUsd.plus(item.gasCostUsd);
+
+        sum.maxGasCostAmount = sum.maxGasCostAmount.plus(item.maxGasCostAmount);
+        sum.gasCostRawAmount = sum.gasCostRawAmount.plus(
+          item.gasCostRawAmount || 0,
+        );
+        sum.maxGasCostRawAmount = sum.maxGasCostRawAmount.plus(
+          item.maxGasCostRawAmount || 0,
+        );
+        return sum;
+      },
+      {
+        gasCostUsd: new BigNumber(0),
+        gasCostAmount: new BigNumber(0),
+        maxGasCostAmount: new BigNumber(0),
+        gasCostRawAmount: new BigNumber(0),
+        maxGasCostRawAmount: new BigNumber(0),
+      },
+    );
+    return totalCost;
+  }
+  static async sendBatch(params: {
+    chainServerId: string;
+    txsCalc: CalcItem[];
+    selectedGas: GasLevel | null;
+    options: SendOptions;
+    onSigningTxCreated?: (signingTxId: string) => void;
+    onSendedTx: (prams: { hash: string; idx: number }) => void;
+    account: Account;
+    retry?: boolean;
+  }): Promise<
+    | { txHash: string }[]
+    | {
+        error?: {
+          status: 'REJECTED' | 'FAILED';
+          content: string;
+          description: string;
+        };
+      }
+  > {
+    miscServiceApi.setCurrentGasLevel(params?.selectedGas?.level);
+
+    const {
+      chainServerId,
+      txsCalc,
+      options,
+      onSigningTxCreated,
+      onSendedTx,
+      retry: isRetry,
+      account,
+    } = params;
+    let i = 0;
+
+    if (!isRetry) {
+      retryTxs = [];
+      await retryTxReset();
+    } else {
+      if (!retryTxs.length) {
+        retryTxs = txsCalc.map(e => e.tx);
+      }
+    }
+
+    try {
+      const txHashes: { txHash: string }[] = [];
+      for (; i < txsCalc.length; i++) {
+        if (txsCalc[i].hash) {
+          continue;
+        }
+        let tx = txsCalc[i].tx;
+        if (isRetry) {
+          tx = retryTxs[i];
+
+          const retryType = await getRetryTxType();
+          switch (retryType) {
+            case 'nonce': {
+              const recommendNonce = await getRetryTxRecommendNonce();
+              tx.nonce = recommendNonce;
+              break;
+            }
+
+            case 'gasPrice': {
+              if (tx.gasPrice) {
+                tx.gasPrice = `0x${new BigNumber(
+                  new BigNumber(tx.gasPrice, 16).times(1.3).toFixed(0),
+                ).toString(16)}`;
+              }
+              if (tx.maxFeePerGas) {
+                tx.maxFeePerGas = `0x${new BigNumber(
+                  new BigNumber(tx.maxFeePerGas, 16).times(1.3).toFixed(0),
+                ).toString(16)}`;
+              }
+              break;
+            }
+
+            default:
+              break;
+          }
+          const tmp = [...retryTxs];
+          tmp[i] = { ...tx };
+          retryTxs = tmp;
+        }
+        let sig: string | undefined;
+        if (options?.isGasAccount) {
+          sig = (await gasAccountServiceApi.getGasAccountSig()).sig;
+        }
+
+        const result = await sendTransaction({
+          tx,
+          chainServerId,
+          pushType: options?.pushType || 'default',
+          isGasLess: !!options?.isGasLess,
+          isGasAccount: !!options?.isGasAccount,
+          ga: options?.ga,
+          session: options?.session,
+          sig,
+          account: account,
+          preExecResult: txsCalc[i]?.preExecResult,
+          onSigningTxCreated,
+        });
+        onSendedTx?.({ hash: result.txHash, idx: i });
+        txHashes.push({ ...result });
+      }
+
+      retryTxReset();
+      return txHashes;
+    } catch (e: any) {
+      const msg = e?.message || e?.name || 'unknown error';
+      retryTxReset();
+      const tx = txsCalc?.[i]?.tx;
+      await setRetryTxRecommendNonce({
+        from: tx.from,
+        chainId: tx.chainId,
+        account: account,
+        nonce: tx.nonce,
+      });
+
+      const _status =
+        e.name === FailedCode.UserRejected ? 'REJECTED' : 'FAILED';
+
+      return {
+        error: {
+          status: _status,
+          content:
+            _status === 'REJECTED'
+              ? t('page.signFooterBar.ledger.txRejected')
+              : t('page.signFooterBar.qrcode.txFailed'),
+          description: msg,
+        },
+      };
+    }
+  }
+
+  static toCtxFromPrepared(params: {
+    prepared: PreparedContext;
+    txs: Tx[];
+    open: boolean;
+    switchGasAccount?: boolean;
+  }): SignerCtx {
+    const { prepared, txs, open, switchGasAccount } = params;
+    return {
+      fingerprint: buildFingerprint(txs),
+      open,
+      mode: 'ui',
+      txs,
+      gasMethod: switchGasAccount ? 'gasAccount' : 'native',
+      useGasless: false,
+      ...prepared,
+    };
+  }
+
+  static async prefetchCore(params: {
+    account: Account;
+    txs: Tx[];
+    enableSecurityEngine?: boolean;
+    gasSelection?: GasSelectionOptions;
+    autoSwitchGasAccount?: boolean;
+    config: SignerConfig;
+  }): Promise<SignerCtx> {
+    const {
+      account,
+      txs,
+      enableSecurityEngine,
+      gasSelection,
+      config,
+      autoSwitchGasAccount = true,
+    } = params;
+    const prepared = await SignatureSteps.prepareContext({
+      account,
+      txs,
+      enableSecurityEngine,
+      gasSelection,
+      config,
+    });
+
+    let switchGasAccount = false;
+    if (autoSwitchGasAccount && prepared.txsCalc?.length) {
+      switchGasAccount = shouldAutoSwitchToApprovalGasAccount({
+        nativeTokenInsufficient: !!prepared.isGasNotEnough,
+        freeGasAvailable: !!prepared.gasless?.is_gasless,
+        gasAccountChainSupported:
+          !!prepared.gasAccount && !prepared.gasAccount.chain_not_support,
+        noCustomRPC: !!prepared.noCustomRPC,
+      });
+    }
+
+    return SignatureSteps.toCtxFromPrepared({
+      prepared,
+      txs,
+      open: false,
+      switchGasAccount,
+    });
+  }
+
+  static async openUICore(params: {
+    account: Account;
+    txs: Tx[];
+    enableSecurityEngine?: boolean;
+    gasSelection?: GasSelectionOptions;
+    existing?: SignerCtx | Promise<SignerCtx>;
+    config: SignerConfig;
+  }): Promise<SignerCtx> {
+    const {
+      account,
+      txs,
+      enableSecurityEngine,
+      gasSelection,
+      config,
+      existing,
+    } = params;
+    const fp = buildFingerprint(txs);
+    let ctx: SignerCtx;
+    if (!existing || (await existing).fingerprint !== fp) {
+      ctx = await SignatureSteps.prefetchCore({
+        account,
+        txs,
+        enableSecurityEngine,
+        gasSelection,
+        config,
+      });
+    } else {
+      ctx = await existing;
+    }
+    ctx = { ...ctx, open: true };
+    if (enableSecurityEngine && !ctx.engineResults && ctx.txsCalc?.length) {
+      try {
+        const last = ctx.txsCalc[ctx.txsCalc.length - 1];
+        const results = await SignatureSteps.getSecurityEngineResults({
+          account,
+          chainId: ctx.chainId,
+          last: last as any,
+        });
+        ctx = { ...ctx, engineResults: results };
+      } catch (err) {
+        console.log('getSecurityEngineResults err', err);
+      }
+    }
+    return ctx;
+  }
+
+  static async updateGasCore(params: {
+    ctx: SignerCtx;
+    gas: GasLevel;
+    account: Account;
+  }): Promise<SignerCtx> {
+    const { ctx, gas, account } = params;
+    const { txsCalc, gasList, chainId, is1559, nativeTokenBalance, gasToken } =
+      ctx;
+    const updated = await SignatureSteps.refreshOnGasChange({
+      account,
+      chainId,
+      is1559Capable: !!is1559,
+      gasList,
+      txsCalc: txsCalc as any,
+      newGas: gas,
+      nativeTokenBalance,
+      gasToken,
+    });
+    return {
+      ...ctx,
+      selectedGas: gas,
+      ...updated,
+    };
+  }
+
+  static async sendCore(params: {
+    chainServerId: string;
+    ctx: SignerCtx;
+    config: SignerConfig;
+    onSigningTxCreated?: (signingTxId: string) => void;
+    onSendedTx: (prams: { hash: string; idx: number }) => void;
+    account: Account;
+    retry?: boolean;
+  }): Promise<
+    | {
+        txHash: string;
+      }[]
+    | {
+        error?: {
+          status: 'REJECTED' | 'FAILED';
+          content: string;
+          description: string;
+        };
+      }
+  > {
+    const {
+      chainServerId,
+      ctx,
+      config,
+      onSigningTxCreated,
+      onSendedTx,
+      account,
+      retry,
+    } = params;
+    const { txs, txsCalc, selectedGas, gasMethod, useGasless } = ctx;
+    const submitGasMode = resolveMiniSignSubmitGasMode({
+      gasMethod,
+      useGasless,
+    });
+    const res = await SignatureSteps.sendBatch({
+      chainServerId,
+      txsCalc: txsCalc,
+      selectedGas: selectedGas!,
+      options: {
+        isGasLess: submitGasMode === 'gasless',
+        isGasAccount: submitGasMode === 'gasAccount',
+        ga: config?.ga,
+        session: config?.session,
+        pushType: normalizeTxParams(txs[0])?.swapPreferMEVGuarded
+          ? 'mev'
+          : 'default',
+      },
+      onSigningTxCreated,
+      onSendedTx,
+      retry,
+      account,
+    });
+    return res;
+  }
+}

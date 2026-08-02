@@ -1,0 +1,299 @@
+import AutoLockView from '@/components/AutoLockView';
+import { AppBottomSheetModal } from '@/components/customized/BottomSheet';
+import { useAccountSelectorList } from '@/components2024/AccountSelector/useAccountSelectorList';
+import { makeBottomSheetProps } from '@/components2024/GlobalBottomSheetModal/utils-help';
+import { apisPerps } from '@/core/apis';
+import type { Account } from '@/core/startupServices/preference';
+import type { KeyringAccountWithAlias } from '@/hooks/account';
+import { useAccounts, usePinAddresses } from '@/hooks/account';
+import { useTheme2024 } from '@/hooks/theme';
+import { createGetStyles2024 } from '@/utils/styles';
+import { BottomSheetScrollView } from '@gorhom/bottom-sheet';
+import { useMemoizedFn, useRequest } from 'ahooks';
+import { keyBy, sortBy, uniqBy } from 'lodash';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { useWindowDimensions, View } from 'react-native';
+import { PerpsAccountSelectorItem } from './PerpsAccountSelectorItem';
+import { getClearinghouseStateByMap } from '@/hooks/perps/usePerpsStore';
+import { UserAbstractionResp } from '@rabby-wallet/hyperliquid-sdk';
+import { formatSpotState } from '@/utils/perps';
+import { Text } from '@/components/Typography';
+import { useEnablePerpsWatchAddress } from '@/hooks/appSettings';
+
+export const PerpsAccountSelectorPopup: React.FC<{
+  visible?: boolean;
+  onClose?(): void;
+  value?: Account | null;
+  onChange?: (a: Account) => void;
+  title?: React.ReactNode;
+  checkIconPosition?: 'name' | 'right';
+}> = ({
+  visible,
+  onClose,
+  value,
+  onChange,
+  title,
+  checkIconPosition = 'name',
+}) => {
+  const modalRef = useRef<AppBottomSheetModal>(null);
+
+  const { styles, colors2024, isLight } = useTheme2024({
+    getStyle: getModalStyle,
+  });
+
+  const { height } = useWindowDimensions();
+  const maxHeight = useMemo(() => {
+    return height - 200;
+  }, [height]);
+
+  useEffect(() => {
+    if (visible) {
+      modalRef.current?.present();
+    } else {
+      modalRef.current?.close();
+    }
+  }, [visible]);
+
+  const { data: lastUsedAccount, runAsync: runGetLastUsedAccount } = useRequest(
+    () => {
+      return apisPerps.getPerpsLastUsedAccount();
+    },
+    {
+      manual: true,
+    },
+  );
+
+  const { fetchAccounts } = useAccounts({ disableAutoFetch: true });
+  const { getPinAddressesAsync } = usePinAddresses({
+    disableAutoFetch: true,
+  });
+  const { myAddresses, watchAddresses } = useAccountSelectorList({
+    selectedAccount: value,
+  });
+
+  const { enablePerpsWatchAddress } = useEnablePerpsWatchAddress();
+
+  const addresses = useMemo(
+    () =>
+      enablePerpsWatchAddress
+        ? [...myAddresses, ...watchAddresses]
+        : myAddresses,
+    [enablePerpsWatchAddress, myAddresses, watchAddresses],
+  );
+
+  const { data: _data, runAsync: runFetchPerpsInfo } = useRequest(
+    async () => {
+      const list = uniqBy(addresses, i => i.address.toLowerCase());
+      const res = await Promise.all(
+        list.slice(0, 10).map(async item => {
+          try {
+            const info = getClearinghouseStateByMap(item.address);
+            if (info && Number(info.withdrawable || 0) < 1) {
+              try {
+                const sdk = apisPerps.getPerpsSDK();
+                const userAbstraction = await sdk.info.getUserAbstraction(
+                  item.address,
+                );
+                if (userAbstraction === UserAbstractionResp.unifiedAccount) {
+                  const spotState = await sdk.info.getSpotClearingHouseState(
+                    item.address,
+                  );
+                  const formatted = formatSpotState(spotState);
+                  return {
+                    address: item.address,
+                    info: {
+                      ...info,
+                      withdrawable: formatted.availableToTrade,
+                    },
+                  };
+                }
+              } catch (e) {
+                // unifiedAccount get error，fallback use info
+              }
+            }
+            return { address: item.address, info };
+          } catch (e) {
+            return { address: item.address, info: null };
+          }
+        }),
+      );
+
+      const resDict = keyBy(res, item => item.address.toLowerCase());
+
+      const listWithInfo = addresses.map(account => {
+        const item = resDict[account.address.toLowerCase()];
+        return {
+          account,
+          info: item?.info ? { ...item.info } : null,
+        };
+      });
+
+      return sortBy(
+        listWithInfo,
+        item => -(item.info?.assetPositions?.length || 0),
+        item => -Number(item.info?.withdrawable || 0),
+      );
+    },
+    {
+      manual: true,
+      cacheKey: `PerpsAccountSelectorPopup-fetchPerpsInfo-${addresses
+        .map(i => i.address)
+        .join('-')}`,
+      // cacheTime: 10 * 1000,
+      staleTime: 10 * 1000,
+    },
+  );
+
+  const data = useMemo(() => {
+    return _data ?? addresses.map(account => ({ account, info: null }));
+  }, [_data, addresses]);
+
+  const [tmpSelectAccount, setTmpSelectAccount] = useState<Account | null>(
+    value || null,
+  );
+
+  const {
+    loading,
+    runAsync: runSelect,
+    cancel: cancelSelect,
+  } = useRequest(
+    async (value: Account) => {
+      await onChange?.(value);
+    },
+    {
+      manual: true,
+    },
+  );
+
+  const handleSelect = useMemoizedFn((value: Account) => {
+    if (loading) {
+      return;
+    }
+    setTmpSelectAccount(value);
+    runSelect(value);
+  });
+
+  useEffect(() => {
+    if (!visible) {
+      setTmpSelectAccount(value || null);
+      cancelSelect();
+    } else {
+      Promise.allSettled([
+        fetchAccounts({ force: true }),
+        getPinAddressesAsync(),
+      ]);
+      runGetLastUsedAccount();
+    }
+  }, [
+    cancelSelect,
+    fetchAccounts,
+    getPinAddressesAsync,
+    runGetLastUsedAccount,
+    value,
+    visible,
+  ]);
+
+  useEffect(() => {
+    if (visible) {
+      runFetchPerpsInfo();
+    }
+  }, [runFetchPerpsInfo, visible]);
+
+  return (
+    <AppBottomSheetModal
+      ref={modalRef}
+      // snapPoints={snapPoints}
+      {...makeBottomSheetProps({
+        colors: colors2024,
+        linearGradientType: isLight ? 'bg0' : 'bg1',
+      })}
+      onDismiss={onClose}
+      enableDynamicSizing
+      enableContentPanningGesture
+      maxDynamicContentSize={maxHeight}>
+      <BottomSheetScrollView>
+        <AutoLockView style={[styles.container]}>
+          <View>
+            <Text style={styles.title}>{title || 'Select Account'}</Text>
+          </View>
+          {data.length ? (
+            <View style={styles.section}>
+              {data.map(item => {
+                return (
+                  <PerpsAccountSelectorItem
+                    key={
+                      item.account.address +
+                      item.account.type +
+                      item.account.brandName
+                    }
+                    account={item.account}
+                    tmpSelectAccount={
+                      tmpSelectAccount as KeyringAccountWithAlias
+                    }
+                    info={item?.info}
+                    lastUsedAccount={lastUsedAccount as KeyringAccountWithAlias}
+                    loading={loading}
+                    onPress={handleSelect}
+                    currentAccount={value as KeyringAccountWithAlias}
+                    checkIconPosition={checkIconPosition}
+                  />
+                );
+              })}
+            </View>
+          ) : null}
+        </AutoLockView>
+      </BottomSheetScrollView>
+    </AppBottomSheetModal>
+  );
+};
+
+const getModalStyle = createGetStyles2024(ctx => {
+  const { colors2024, isLight } = ctx;
+  return {
+    handleStyle: {
+      backgroundColor: isLight
+        ? colors2024['neutral-bg-0']
+        : colors2024['neutral-bg-1'],
+      paddingTop: 10,
+      height: 36,
+    },
+    container: {
+      // height: '100%',
+      minHeight: 364,
+      backgroundColor: isLight
+        ? colors2024['neutral-bg-0']
+        : colors2024['neutral-bg-1'],
+      paddingHorizontal: 20,
+      // display: 'flex',
+      // flexDirection: 'column',
+      paddingBottom: 36,
+    },
+    title: {
+      fontSize: 20,
+      lineHeight: 24,
+      fontWeight: '900',
+      color: colors2024['neutral-title-1'],
+      fontFamily: 'SF Pro Rounded',
+      marginBottom: 20,
+      textAlign: 'center',
+    },
+    section: {
+      // marginBottom: 12,
+    },
+    sectionHeader: {
+      display: 'flex',
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      paddingHorizontal: 6,
+      marginBottom: 8,
+    },
+    sectionTitle: {
+      fontSize: 16,
+      lineHeight: 20,
+      fontWeight: '400',
+      color: colors2024['neutral-secondary'],
+      fontFamily: 'SF Pro Rounded',
+    },
+  };
+});

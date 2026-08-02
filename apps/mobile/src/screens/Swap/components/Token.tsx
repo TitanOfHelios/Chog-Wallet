@@ -1,0 +1,478 @@
+import type { TokenItem } from '@rabby-wallet/rabby-api/dist/types';
+import type { QuoteProvider } from '../hooks';
+import { useTranslation } from 'react-i18next';
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
+import { tokenAmountBn } from '../utils';
+import {
+  formatTokenAmount,
+  formatTokenAmountInput,
+  formatUsdValue,
+} from '@/utils/number';
+import BigNumber from 'bignumber.js';
+import { Slider } from '@rneui/themed';
+
+import type { TokenSelectInst } from './TokenSelect';
+import TokenSelect from './TokenSelect';
+import SwapToTokenSelect from './SwapToTokenSelect';
+import LinearGradient from 'react-native-linear-gradient';
+import { useTheme2024 } from '@/hooks/theme';
+import { createGetStyles2024 } from '@/utils/styles';
+import { Pressable, StyleSheet, View } from 'react-native';
+
+import RcIconWalletCC from '@/assets2024/icons/swap/wallet-cc.svg';
+import { SliderBubblePortal } from './Slider';
+import type { Account } from '@/core/startupServices/preference';
+import { CustomSkeleton } from '@/components2024/CustomSkeleton';
+import usePrevious from 'react-use/lib/usePrevious';
+import { ITokenItem } from '@/store/tokens';
+import { Text } from '@/components/Typography';
+import {
+  AutoShrinkAmountText,
+  AutoShrinkAmountTextInput,
+} from '@/components/AutoShrinkAmountTextInput';
+
+interface SwapTokenItemProps {
+  type: 'from' | 'to';
+  token?: TokenItem;
+  value: string;
+  account?: Account | null;
+  chainId: string;
+  onTokenChange: (token: TokenItem) => void;
+  onValueChange?: (s: string) => void;
+  label?: React.ReactNode;
+  slider?: number;
+  onChangeSlider?: (value: number, syncAmount?: boolean) => void;
+  excludeTokens?: string[];
+  inSufficient?: boolean;
+  valueLoading?: boolean;
+  currentQuote?: QuoteProvider;
+  finishedQuotes?: number;
+  skeletonLoading?: boolean;
+  disabled?: boolean;
+}
+export const SwapTokenItem = (props: SwapTokenItemProps) => {
+  const {
+    type,
+    token,
+    value,
+    onTokenChange,
+    onValueChange,
+    excludeTokens,
+    account,
+    chainId,
+    slider,
+    onChangeSlider,
+    inSufficient,
+    valueLoading,
+    currentQuote,
+    skeletonLoading,
+    disabled,
+  } = props;
+  const { t } = useTranslation();
+
+  const { colors2024, styles } = useTheme2024({ getStyle });
+
+  const isFrom = type === 'from';
+
+  const openTokenModalRef = useRef<TokenSelectInst>(null);
+
+  const handleTokenModalOpen = useCallback(() => {
+    if (!valueLoading && !currentQuote && !isFrom) {
+      openTokenModalRef?.current?.openTokenModal?.({ account });
+    }
+  }, [currentQuote, isFrom, valueLoading, account]);
+
+  const [balance, usdValue] = useMemo(() => {
+    if (token) {
+      const amount = tokenAmountBn(token);
+      return [
+        formatTokenAmount(amount.toString(10)),
+
+        formatUsdValue(
+          new BigNumber(value || 0).times(token?.price).toString(10),
+        ),
+      ];
+    }
+    return [0, formatUsdValue(0)];
+  }, [token, value]);
+
+  const onTokenSelect = useCallback(
+    (newToken: TokenItem) => {
+      onTokenChange(newToken);
+      if (isFrom && newToken.id !== token?.id) {
+        onValueChange?.('');
+      }
+    },
+    [isFrom, onTokenChange, onValueChange, token?.id],
+  );
+
+  const onInputChange: (text: string) => void = useCallback(
+    e => {
+      onValueChange?.(formatTokenAmountInput(e, token?.decimals));
+    },
+    [onValueChange, token?.decimals],
+  );
+
+  const [isSliderBubbleVisible, setIsSliderBubbleVisible] = useState(false);
+  const sliderThumbRef = useRef<View>(null);
+
+  const onSlidingStart = useCallback(() => {
+    if (!disabled) {
+      setIsSliderBubbleVisible(true);
+    }
+  }, [disabled]);
+
+  const onAfterChangeSlider = useCallback(
+    (v: number) => {
+      onChangeSlider?.(v, true);
+      setIsSliderBubbleVisible(false);
+    },
+    [onChangeSlider],
+  );
+
+  const prevToken = usePrevious(token);
+
+  const shouldSyncAmountWithToken =
+    isFrom &&
+    !!slider &&
+    Number(value) === 0 &&
+    !!onChangeSlider &&
+    prevToken?.chain === token?.chain &&
+    prevToken?.id === token?.id &&
+    (token?.amount !== prevToken?.amount ||
+      token?.raw_amount_hex_str !== prevToken?.raw_amount_hex_str);
+
+  useEffect(() => {
+    if (!shouldSyncAmountWithToken || !slider) {
+      return;
+    }
+
+    console.debug('sync amount with token', slider);
+    onAfterChangeSlider(slider);
+  }, [onAfterChangeSlider, shouldSyncAmountWithToken, slider]);
+
+  const Linear = useCallback(() => {
+    return (
+      <LinearGradient
+        start={{ x: 0, y: 0 }}
+        end={{ x: 1, y: 0 }}
+        // eslint-disable-next-line react-native/no-inline-styles
+        style={{ height: '100%' }}
+        colors={[colors2024['neutral-line'], colors2024['neutral-bg-2']]}
+      />
+    );
+  }, [colors2024]);
+
+  return (
+    <Pressable style={styles.container} onPress={handleTokenModalOpen}>
+      <View style={styles.top}>
+        <Text style={styles.subTitle}>
+          {isFrom ? t('page.swap.from') : t('page.swap.to')}
+        </Text>
+        {isFrom && (
+          <View style={styles.sliderContainer}>
+            <Slider
+              key={`${token?.id}-${token?.chain}`}
+              allowTouchTrack={!disabled}
+              disabled={disabled}
+              style={styles.slider}
+              value={slider}
+              onSlidingStart={onSlidingStart}
+              onValueChange={onChangeSlider}
+              onSlidingComplete={onAfterChangeSlider}
+              minimumValue={0}
+              maximumValue={100}
+              minimumTrackTintColor={colors2024['brand-default']}
+              maximumTrackTintColor={colors2024['neutral-line']}
+              step={1}
+              thumbStyle={styles.thumbStyle}
+              thumbProps={{
+                children: (
+                  <View>
+                    <View ref={sliderThumbRef} style={styles.outerThumb}>
+                      <View style={styles.innerThumb} />
+                    </View>
+                  </View>
+                ),
+              }}
+            />
+            <SliderBubblePortal
+              anchorRef={sliderThumbRef}
+              slide={slider || 0}
+              visible={isSliderBubbleVisible}
+            />
+            <Text style={styles.sliderValue}>{slider}%</Text>
+          </View>
+        )}
+      </View>
+
+      <View style={styles.inputContainer}>
+        <View style={styles.tokenSelectBox}>
+          {isFrom ? (
+            <TokenSelect
+              ref={openTokenModalRef}
+              token={token}
+              onTokenChange={onTokenSelect}
+              accountInScreen={account}
+              chainId={chainId}
+              type={'swapFrom'}
+              placeholder={t('page.swap.search-by-name-address')}
+            />
+          ) : (
+            <SwapToTokenSelect
+              ref={openTokenModalRef}
+              token={token}
+              onTokenChange={onTokenSelect}
+              accountInScreen={account}
+              chainId={chainId}
+              placeholder={t('page.swap.search-by-name-address')}
+              searchPlaceholder={t(
+                'component.TokenSelector.searchPlaceHolder1',
+              )}
+            />
+          )}
+
+          <View style={styles.vecticalLine} />
+        </View>
+
+        {valueLoading && skeletonLoading ? (
+          <CustomSkeleton
+            animation="wave"
+            LinearGradientComponent={Linear}
+            style={styles.skeleton}
+          />
+        ) : isFrom ? (
+          <AutoShrinkAmountTextInput
+            editable={!disabled}
+            contextMenuHidden={disabled}
+            numberOfLines={1}
+            multiline={false}
+            spellCheck={false}
+            textAlign="right"
+            keyboardType="numeric"
+            inputMode="decimal"
+            placeholder="0"
+            value={value}
+            scrollEnabled={false}
+            placeholderTextColor={colors2024['neutral-info']}
+            onChangeText={onInputChange}
+            style={[
+              styles.input,
+              isFrom && inSufficient && styles.inSufficient,
+            ]}
+          />
+        ) : (
+          <AutoShrinkAmountText
+            numberOfLines={1}
+            style={StyleSheet.flatten([
+              styles.input,
+              valueLoading && styles.loadingOpacity,
+            ])}>
+            {value || '0'}
+          </AutoShrinkAmountText>
+        )}
+      </View>
+
+      <View style={styles.bottom}>
+        <View style={styles.balanceContainer}>
+          <RcIconWalletCC
+            width={16}
+            height={16}
+            color={
+              inSufficient
+                ? colors2024['red-default']
+                : colors2024['neutral-foot']
+            }
+          />
+          <Text
+            numberOfLines={1}
+            ellipsizeMode="tail"
+            style={[styles.balance, inSufficient && styles.inSufficient]}>
+            {balance}
+          </Text>
+        </View>
+        <View style={styles.usdValueContainer}>
+          {valueLoading && skeletonLoading ? (
+            <CustomSkeleton
+              animation="wave"
+              LinearGradientComponent={Linear}
+              style={styles.skeleton2}
+            />
+          ) : (
+            <Text
+              style={StyleSheet.flatten([
+                styles.usdValue,
+                valueLoading && styles.loadingOpacity,
+              ])}>
+              {usdValue}
+            </Text>
+          )}
+        </View>
+      </View>
+    </Pressable>
+  );
+};
+
+const getStyle = createGetStyles2024(({ colors2024 }) => ({
+  container: {
+    paddingHorizontal: 16,
+    paddingVertical: 16,
+    backgroundColor: 'transparent',
+    // height: 134,
+  },
+  top: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  subTitle: {
+    color: colors2024['neutral-secondary'],
+    fontFamily: 'SF Pro Rounded',
+    fontSize: 16,
+    fontWeight: '500',
+    lineHeight: 20,
+  },
+  sliderContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    position: 'relative',
+    gap: 8,
+  },
+  slider: {
+    width: 126,
+    height: 4,
+  },
+  sliderValue: {
+    width: 40,
+    textAlign: 'right',
+    color: colors2024['brand-default'],
+    fontSize: 13,
+    fontWeight: '500',
+    fontFamily: 'SF Pro',
+  },
+  input: {
+    fontFamily: 'SF Pro Rounded',
+    color: colors2024['neutral-title-1'],
+    fontSize: 28,
+    fontWeight: '700',
+    paddingLeft: 0,
+    borderWidth: 0,
+    flex: 1,
+    height: 36,
+    lineHeight: 36,
+    textAlign: 'right',
+    textAlignVertical: 'center',
+    includeFontPadding: false,
+    padding: 0,
+    overflow: 'hidden',
+  },
+
+  inSufficient: {
+    color: colors2024['red-default'],
+  },
+
+  inputContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    minWidth: 0,
+    marginTop: 9,
+    marginBottom: 6,
+    height: 36,
+  },
+  tokenSelectBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexShrink: 0,
+  },
+  vecticalLine: {
+    marginLeft: 12,
+    marginRight: 12,
+    borderWidth: 0,
+    borderLeftWidth: 1,
+    width: 0,
+    height: 27,
+    borderColor: colors2024['neutral-line'],
+  },
+
+  bottom: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  balanceContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 4,
+  },
+  balance: {
+    fontSize: 12,
+    fontWeight: '400',
+    maxWidth: 200,
+    color: colors2024['neutral-foot'],
+    fontFamily: 'SF Pro Rounded',
+  },
+  usdValueContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 4,
+  },
+  usdValue: {
+    fontSize: 14,
+    color: colors2024['neutral-secondary'],
+    fontWeight: '400',
+    fontFamily: 'SF Pro Rounded',
+  },
+  skeleton: {
+    overflow: 'hidden',
+    backgroundColor: colors2024['neutral-line'],
+    height: 36,
+    width: 138,
+    borderRadius: 100,
+  },
+
+  skeleton2: {
+    backgroundColor: colors2024['neutral-line'],
+    height: 18,
+    width: 38,
+    borderRadius: 100,
+  },
+  outerThumb: {
+    width: 14,
+    height: 14,
+    borderRadius: 14,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: colors2024['neutral-bg-1'],
+  },
+  innerThumb: {
+    width: 10,
+    height: 10,
+    borderRadius: 10,
+    backgroundColor: colors2024['brand-default'],
+  },
+
+  insufficient: {
+    color: colors2024['red-default'],
+  },
+
+  thumbStyle: {
+    justifyContent: 'center',
+    alignItems: 'center',
+    width: 14,
+    height: 14,
+    backgroundColor: 'transparent',
+  },
+  loadingOpacity: {
+    opacity: 0.5,
+  },
+}));

@@ -1,0 +1,653 @@
+import { useCallback, useEffect, useMemo, useRef } from 'react';
+import { Dimensions, Image, ImageResolvedAssetSource } from 'react-native';
+import RNFS from '@rabby-wallet/react-native-fs';
+
+import RNScreenshotPrevent from '@/core/native/RNScreenshotPrevent';
+import { openapi } from '@/core/request';
+import { AppScreenshotFS, appScreenshotFS } from '@/core/storage/fs';
+import { coerceNumber } from '@/utils/coerce';
+import { zustandByMMKV } from '@/core/storage/mmkv';
+import { APP_MMKV_WEAK_KEYS } from '@/core/storage/mmkvConstants';
+import { useRefState } from '@/hooks/common/useRefState';
+import { IS_ANDROID } from '@/core/native/utils';
+import { isNonPublicProductionEnv } from '@/constant';
+import { getScreenshotFeedbackExtra } from './utils';
+import { getGlobalScreenCapturable } from '@/hooks/native/security';
+import { pick } from 'lodash';
+import { resolveValFromUpdater, UpdaterOrPartials } from '@/core/utils/store';
+import { useShallow } from 'zustand/react/shallow';
+import { zCreate } from '@/core/utils/reexports';
+import DeviceUtils from '@/core/utils/device';
+import { perfEvents } from '@/core/utils/perf';
+import {
+  getVisibleBlockingModalIds,
+  MODAL_GATE_IDS,
+  subscribeModalGateDebugSnapshot,
+} from '@/utils/modalGate';
+import { makeDeviceUUID } from '@/core/apis/device';
+
+export const FORCE_DISABLE_FEEDBACK_BY_SCREENSHOT =
+  IS_ANDROID && !DeviceUtils.isGteAndroid(14);
+type ScreenshotFeedbackStore = {
+  viewedHomeTip: boolean;
+  showFeedbackOnScreenshot_20250923: boolean | null;
+  disableScreenshotToReportUntil: number; // timestamp
+};
+const getDefaultValueFeedback = (): ScreenshotFeedbackStore => ({
+  viewedHomeTip: FORCE_DISABLE_FEEDBACK_BY_SCREENSHOT,
+  showFeedbackOnScreenshot_20250923: true,
+  disableScreenshotToReportUntil: -1,
+});
+const Keys = Object.keys(
+  getDefaultValueFeedback(),
+) as (keyof ScreenshotFeedbackStore)[];
+function trimScreenshotFeedbackStore<T extends ScreenshotFeedbackStore>(
+  input: T,
+): ScreenshotFeedbackStore {
+  return pick(input, Keys);
+}
+
+type ScreenshotState = {
+  isScreenshotReportFree: boolean;
+};
+const screenshotState = zCreate<ScreenshotState>(() => ({
+  isScreenshotReportFree: false,
+}));
+
+function markIsScreenshotReportFree(isFree: boolean) {
+  screenshotState.setState(prev => ({
+    ...prev,
+    isScreenshotReportFree: isFree,
+  }));
+}
+
+export const storeApiScreenshotReport = {
+  markIsScreenshotReportFree,
+  isScreenshotReportFree: () => {
+    return screenshotState.getState().isScreenshotReportFree;
+  },
+};
+
+const screenshotFeedbackStore = zustandByMMKV(
+  APP_MMKV_WEAK_KEYS.SCREENSHOT_FEEDBACK,
+  getDefaultValueFeedback(),
+);
+
+function setScreenshotFeedback(
+  valOrFunc: UpdaterOrPartials<ScreenshotFeedbackStore>,
+) {
+  screenshotFeedbackStore.setState(prev => {
+    const { newVal } = resolveValFromUpdater(prev, valOrFunc, {
+      strict: false,
+    });
+
+    return trimScreenshotFeedbackStore(newVal);
+  });
+}
+
+const toggleScreenshotToReport = (nextVal?: boolean) => {
+  let finalValue = false;
+  setScreenshotFeedback(prev => {
+    if (nextVal === undefined) {
+      const prevEnabled = !!prev.showFeedbackOnScreenshot_20250923;
+      nextVal = !prevEnabled;
+    }
+
+    finalValue = !!nextVal;
+
+    return {
+      ...prev,
+      showFeedbackOnScreenshot_20250923: nextVal,
+    };
+  });
+
+  return finalValue;
+};
+
+const toggleSkipReportIn24Hours = (nextVal: boolean = true) => {
+  setScreenshotFeedback(prev => {
+    if (nextVal) {
+      return {
+        ...prev,
+        disableScreenshotToReportUntil: Date.now() + 24 * 60 * 60 * 1000,
+      };
+    } else {
+      return {
+        ...prev,
+        disableScreenshotToReportUntil: -1,
+      };
+    }
+  });
+};
+
+function isEnabledScreenshotToReport({
+  showFeedbackOnScreenshot,
+  disableScreenshotToReportUntil,
+}: {
+  showFeedbackOnScreenshot: boolean | null;
+  disableScreenshotToReportUntil: number | null;
+}) {
+  if (showFeedbackOnScreenshot === false) return false;
+
+  disableScreenshotToReportUntil = disableScreenshotToReportUntil || 0;
+
+  return disableScreenshotToReportUntil < Date.now();
+}
+
+export function useScreenshotToReportEnabled() {
+  const { disableScreenshotToReportUntil, showFeedbackOnScreenshot_20250923 } =
+    screenshotFeedbackStore(
+      useShallow(s => ({
+        disableScreenshotToReportUntil: s.disableScreenshotToReportUntil,
+        showFeedbackOnScreenshot_20250923: s.showFeedbackOnScreenshot_20250923,
+      })),
+    );
+
+  const isShowFeedbackOnScreenshot = showFeedbackOnScreenshot_20250923 != false;
+
+  return {
+    disableScreenshotToReportUntil: disableScreenshotToReportUntil,
+    isShowFeedbackOnScreenshot,
+    toggleScreenshotToReport,
+    toggleSkipReportIn24Hours,
+  };
+}
+
+const getShowFeedbackOnScreenshotCapture = () => {
+  const values = screenshotFeedbackStore.getState();
+  return isEnabledScreenshotToReport({
+    showFeedbackOnScreenshot: values.showFeedbackOnScreenshot_20250923,
+    disableScreenshotToReportUntil: values.disableScreenshotToReportUntil,
+  });
+};
+
+export function useIsShowFeedbackOnScreenshot() {
+  const { disableScreenshotToReportUntil, showFeedbackOnScreenshot_20250923 } =
+    screenshotFeedbackStore(
+      useShallow(s => ({
+        disableScreenshotToReportUntil: s.disableScreenshotToReportUntil,
+        showFeedbackOnScreenshot_20250923: s.showFeedbackOnScreenshot_20250923,
+      })),
+    );
+
+  const isScreenshotReportEnabled = isEnabledScreenshotToReport({
+    showFeedbackOnScreenshot: showFeedbackOnScreenshot_20250923,
+    disableScreenshotToReportUntil: disableScreenshotToReportUntil,
+  });
+
+  return { isScreenshotReportEnabled };
+}
+
+const markViewedHomeTip = () => {
+  if (screenshotFeedbackStore.getState().viewedHomeTip) return;
+  setScreenshotFeedback(prev => ({
+    ...prev,
+    viewedHomeTip: true,
+  }));
+};
+
+const mockResetViewedHomeTip = () => {
+  if (!isNonPublicProductionEnv) return;
+  setScreenshotFeedback(prev => ({
+    ...prev,
+    viewedHomeTip: false,
+  }));
+};
+
+export function useViewedHomeTip() {
+  const { viewedHomeTip } = screenshotFeedbackStore(
+    useShallow(s => ({
+      viewedHomeTip: s.viewedHomeTip,
+    })),
+  );
+
+  return {
+    viewedHomeTip: FORCE_DISABLE_FEEDBACK_BY_SCREENSHOT ? true : viewedHomeTip,
+    markViewedHomeTip,
+    mockResetViewedHomeTip,
+  };
+}
+
+type FeedbackByScreenshotState = {
+  lastScreenshot: ImageResolvedAssetSource | null;
+  submitModalShown: boolean;
+  isShowHistory: boolean;
+  feedbackHistoryRefreshKey: number;
+  feedbackText: string;
+  uploadedImageUrl: string;
+
+  totalBalanceText: string;
+};
+function getDefaultValue(): FeedbackByScreenshotState {
+  return {
+    lastScreenshot: null,
+    submitModalShown: false,
+    isShowHistory: false,
+    feedbackHistoryRefreshKey: 0,
+    feedbackText: '',
+    uploadedImageUrl: '',
+
+    totalBalanceText: '',
+  };
+}
+export const SCREENSHOT_FEEDBACK_MAX_LENGTH = 301;
+const DEBUG_SCREENSHOT_DATA_URI =
+  'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9s2vNh0AAAAASUVORK5CYII=';
+const feedbackByScreenshotStore = zCreate<FeedbackByScreenshotState>(() => ({
+  ...getDefaultValue(),
+}));
+
+function setFeedbackByScreenshot(
+  valOrFunc: UpdaterOrPartials<FeedbackByScreenshotState>,
+) {
+  feedbackByScreenshotStore.setState(prev => {
+    const { newVal, changed } = resolveValFromUpdater(prev, valOrFunc, {
+      strict: true,
+    });
+
+    if (!changed) return prev;
+
+    return newVal;
+  });
+}
+
+export function screenshotModalStartSyncNetworth() {
+  perfEvents.subscribe('SCENE_24H_BALANCE_UPDATED', ({ combinedData }) => {
+    const netWorth = combinedData.netWorth;
+    setFeedbackByScreenshot(prev => ({
+      ...prev,
+      totalBalanceText: netWorth,
+    }));
+  });
+}
+
+export function useSubmitFeedbackModalVisible() {
+  const submitModalShown = feedbackByScreenshotStore(s => s.submitModalShown);
+
+  return {
+    submitFeedbackModalVisible: submitModalShown,
+  };
+}
+
+export function useFeedbackHistoryVisible() {
+  const { isShowHistory, feedbackHistoryRefreshKey } =
+    feedbackByScreenshotStore(
+      useShallow(s => ({
+        isShowHistory: s.isShowHistory,
+        feedbackHistoryRefreshKey: s.feedbackHistoryRefreshKey,
+      })),
+    );
+
+  return {
+    isShowHistory: isShowHistory,
+    feedbackHistoryRefreshKey,
+    toggleFeedbackHistoryVisible,
+  };
+}
+
+export function useScreenshotFeedbackTotalBalanceText() {
+  return feedbackByScreenshotStore(s => s.totalBalanceText);
+}
+
+export const toggleFeedbackHistoryVisible = (v?: boolean) => {
+  setFeedbackByScreenshot(prev => {
+    const isShowHistory = v ?? !prev.isShowHistory;
+
+    return {
+      ...prev,
+      isShowHistory,
+      feedbackHistoryRefreshKey: isShowHistory
+        ? prev.feedbackHistoryRefreshKey + 1
+        : prev.feedbackHistoryRefreshKey,
+    };
+  });
+};
+
+const shouldToastFeedbackByScreenshot = () => {
+  if (FORCE_DISABLE_FEEDBACK_BY_SCREENSHOT) return false;
+  if (!getGlobalScreenCapturable()) return false;
+
+  if (storeApiScreenshotReport.isScreenshotReportFree()) return false;
+
+  const feedbackByScreenshot = feedbackByScreenshotStore.getState();
+  return !feedbackByScreenshot.submitModalShown;
+};
+
+const SCREENSHOT_FEEDBACK_MODAL_GATE_EXCLUDE_IDS = [
+  MODAL_GATE_IDS.screenshotFeedback,
+];
+const DEFERRED_SCREENSHOT_MODAL_OPEN_DELAY_MS = 450;
+
+type PendingScreenshotFeedback = {
+  image: ImageResolvedAssetSource;
+  uploadNow: boolean;
+};
+
+let pendingScreenshotFeedback: PendingScreenshotFeedback | null = null;
+let pendingScreenshotFeedbackTimer: ReturnType<typeof setTimeout> | null = null;
+
+function getBlockingModalIdsForScreenshotFeedback() {
+  return getVisibleBlockingModalIds({
+    excludeIds: SCREENSHOT_FEEDBACK_MODAL_GATE_EXCLUDE_IDS,
+  });
+}
+
+function clearPendingScreenshotFeedbackTimer() {
+  if (!pendingScreenshotFeedbackTimer) {
+    return;
+  }
+
+  clearTimeout(pendingScreenshotFeedbackTimer);
+  pendingScreenshotFeedbackTimer = null;
+}
+
+const setLastScreenshotNow = (
+  image: ImageResolvedAssetSource | null,
+  uploadNow = false,
+) => {
+  setFeedbackByScreenshot(prev => ({
+    ...prev,
+    lastScreenshot: image,
+    submitModalShown: !!image,
+    feedbackText: '',
+    uploadedImageUrl: '',
+  }));
+
+  if (image?.uri && uploadNow) {
+    AppScreenshotFS.uploadFile<{ image_url: string }>(image?.uri).then(
+      result => {
+        if (result?.image_url) {
+          setFeedbackByScreenshot(prev => ({
+            ...prev,
+            uploadedImageUrl: result.image_url,
+          }));
+        }
+      },
+    );
+  }
+};
+
+function schedulePendingScreenshotFeedbackFlush() {
+  clearPendingScreenshotFeedbackTimer();
+
+  if (!pendingScreenshotFeedback) {
+    return;
+  }
+
+  const blockingModalIds = getBlockingModalIdsForScreenshotFeedback();
+  if (blockingModalIds.length) {
+    return;
+  }
+
+  pendingScreenshotFeedbackTimer = setTimeout(() => {
+    pendingScreenshotFeedbackTimer = null;
+
+    if (!pendingScreenshotFeedback) {
+      return;
+    }
+
+    const nextBlockingModalIds = getBlockingModalIdsForScreenshotFeedback();
+    if (nextBlockingModalIds.length) {
+      return;
+    }
+
+    const pending = pendingScreenshotFeedback;
+    pendingScreenshotFeedback = null;
+
+    if (!shouldToastFeedbackByScreenshot()) {
+      return;
+    }
+
+    setLastScreenshotNow(pending.image, pending.uploadNow);
+  }, DEFERRED_SCREENSHOT_MODAL_OPEN_DELAY_MS);
+}
+
+subscribeModalGateDebugSnapshot(() => {
+  schedulePendingScreenshotFeedbackFlush();
+});
+
+const setLastScreenshot = (
+  image: ImageResolvedAssetSource | null,
+  uploadNow = false,
+) => {
+  if (!image) {
+    pendingScreenshotFeedback = null;
+    clearPendingScreenshotFeedbackTimer();
+    setLastScreenshotNow(image, uploadNow);
+    return;
+  }
+
+  const blockingModalIds = getBlockingModalIdsForScreenshotFeedback();
+  if (blockingModalIds.length) {
+    pendingScreenshotFeedback = {
+      image,
+      uploadNow,
+    };
+
+    __DEV__ &&
+      console.debug(
+        '[modal-gate] defer screenshot feedback modal open, blocking modals:',
+        blockingModalIds,
+      );
+
+    schedulePendingScreenshotFeedbackFlush();
+    return;
+  }
+
+  setLastScreenshotNow(image, uploadNow);
+};
+
+export function debugShowSubmitFeedbackByScreenshotModal() {
+  setLastScreenshot(
+    Image.resolveAssetSource({
+      uri: DEBUG_SCREENSHOT_DATA_URI,
+      width: 1179,
+      height: 2556,
+      scale: 1,
+    }),
+  );
+}
+
+if (IS_ANDROID && !FORCE_DISABLE_FEEDBACK_BY_SCREENSHOT) {
+  RNScreenshotPrevent.startScreenCaptureDetection().then(() => {
+    console.debug(
+      '[info] RNScreenshotPrevent started screen capture detection on Android',
+    );
+  });
+}
+
+export function startSubscribeUserDidTakeScreenshot() {
+  const subscription = RNScreenshotPrevent.onUserDidTakeScreenshot(
+    async params => {
+      if (!getShowFeedbackOnScreenshotCapture()) return;
+      if (!params?.captured) return;
+
+      if (!shouldToastFeedbackByScreenshot()) return;
+
+      const sizes = {
+        height: coerceNumber(params?.height, 100),
+        width: coerceNumber(params?.width, 100),
+      };
+      const fullPath = params?.path
+        ? AppScreenshotFS.normalizeLocalFilePath(params.path)
+        : '';
+
+      if (params?.imageBase64) {
+        const inAppPath = await appScreenshotFS.saveScreenshotFrom(
+          params.imageBase64,
+          {
+            fallbackAsBase64: true,
+            imageType: params?.imageType,
+          },
+        );
+        const screenshotUri = inAppPath
+          ? AppScreenshotFS.normalizeImageUri(
+              inAppPath,
+              params.imageType || 'image/jpeg',
+            )
+          : AppScreenshotFS.normalizeBase64(
+              params.imageBase64,
+              params.imageType || 'image/jpeg',
+            );
+
+        setLastScreenshot(
+          Image.resolveAssetSource({
+            // TODO: set contentType by params.type
+            uri: screenshotUri,
+            height: sizes.height,
+            width: sizes.width,
+          }),
+        );
+      } else if (fullPath && (await RNFS.exists(fullPath))) {
+        const inAppPath = await appScreenshotFS.saveScreenshotFrom(fullPath, {
+          imageType: params?.imageType,
+          cleanupSource: true,
+        });
+        if (!inAppPath) return;
+
+        setLastScreenshot(
+          Image.resolveAssetSource({
+            // TODO: set contentType by params.type
+            uri: AppScreenshotFS.normalizeImageUri(
+              inAppPath,
+              params?.imageType || 'image/jpeg',
+            ),
+            height: sizes.height,
+            width: sizes.width,
+          }),
+        );
+      }
+    },
+  );
+
+  return subscription;
+}
+
+const onChangeFeedback = (feedback: string) => {
+  setFeedbackByScreenshot(prev => ({
+    ...prev,
+    feedbackText: feedback.slice(0, SCREENSHOT_FEEDBACK_MAX_LENGTH),
+  }));
+};
+
+export function useFeedbackOnScreenshot() {
+  const { submitModalShown, feedbackText, uploadedImageUrl } =
+    feedbackByScreenshotStore(
+      useShallow(s => ({
+        submitModalShown: s.submitModalShown,
+        feedbackText: s.feedbackText,
+        uploadedImageUrl: s.uploadedImageUrl,
+      })),
+    );
+
+  return {
+    globalModalShown: submitModalShown,
+    feedbackText,
+    uploadedImageUrl,
+    onChangeFeedback,
+  };
+}
+
+const closeSubmitModal = ({
+  skipInNext1Day = false,
+  clearText = true,
+}: { skipInNext1Day?: boolean; clearText?: boolean } = {}) => {
+  if (skipInNext1Day) {
+    toggleSkipReportIn24Hours(true);
+  }
+  setFeedbackByScreenshot(prev => ({
+    ...prev,
+    submitModalShown: false,
+    lastScreenshot: null,
+    feedbackText: clearText ? '' : prev.feedbackText,
+    uploadedImageUrl: '',
+  }));
+};
+
+export async function getScreenshotFeedbackExtraSafely(
+  totalBalanceText: string,
+) {
+  try {
+    return await getScreenshotFeedbackExtra({ totalBalanceText });
+  } catch (error) {
+    console.error('screenshot feedback extra error', error);
+    return {};
+  }
+}
+
+export function useSubmitFeedbackOnScreenshot() {
+  const { lastScreenshot, totalBalanceText } = feedbackByScreenshotStore(
+    useShallow(s => ({
+      lastScreenshot: s.lastScreenshot,
+      totalBalanceText: s.totalBalanceText,
+    })),
+  );
+
+  const { globalModalShown, feedbackText, uploadedImageUrl } =
+    useFeedbackOnScreenshot();
+
+  const { stateRef: isSubmittingRef, setRefState: setSubmitting } =
+    useRefState(false);
+  const submitFeedbackByScreenshot = useCallback(
+    async function () {
+      if (isSubmittingRef.current) return false;
+      setSubmitting(true, true);
+
+      try {
+        let imageUrl = uploadedImageUrl;
+        if (!imageUrl && lastScreenshot?.uri) {
+          const result = await AppScreenshotFS.uploadFile<{
+            image_url: string;
+          }>(lastScreenshot?.uri);
+          if (!result?.image_url) {
+            throw new Error('Screenshot upload did not return an image url');
+          }
+          imageUrl = result.image_url;
+        }
+
+        if (!imageUrl) {
+          throw new Error('No screenshot available');
+        }
+
+        const extraInfo = await getScreenshotFeedbackExtraSafely(
+          totalBalanceText,
+        );
+        // console.debug('[debug] extraInfo', extraInfo);
+
+        // TODO: report to sentry here, add extra fields here
+        await openapi.postClientFeedbackMessage({
+          device_id: makeDeviceUUID().deviceUUID,
+          image_url_list: [imageUrl],
+          content: feedbackText,
+          extra: extraInfo,
+        });
+        return true;
+      } catch (error) {
+        console.error('feedback submission error', error);
+        throw error;
+      } finally {
+        setSubmitting(false, true);
+      }
+    },
+    [
+      feedbackText,
+      totalBalanceText,
+      uploadedImageUrl,
+      lastScreenshot?.uri,
+      isSubmittingRef,
+      setSubmitting,
+    ],
+  );
+
+  return {
+    lastScreenshot,
+    globalModalShown,
+    feedbackText,
+
+    closeSubmitModal,
+    isSubmitting: isSubmittingRef.current,
+    submitFeedbackByScreenshot,
+
+    canSubmitFeedback: !!lastScreenshot?.uri && !!feedbackText.trim(),
+  };
+}

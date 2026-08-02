@@ -1,0 +1,426 @@
+/* eslint-disable react-native/no-inline-styles */
+import { AppBottomSheetModal } from '@/components';
+import { BottomSheetFlatList } from '@gorhom/bottom-sheet';
+import React, { useCallback, useEffect, useMemo, useRef } from 'react';
+import { ActivityIndicator, TouchableOpacity, View, Image } from 'react-native';
+import { ModalLayouts, RootNames } from '@/constant/layout';
+import { useGetBinaryMode, useTheme2024 } from '@/hooks/theme';
+import { createGetStyles2024 } from '@/utils/styles';
+import type { BottomSheetModalMethods } from '@gorhom/bottom-sheet/src/types';
+import { Skeleton } from '@rneui/themed';
+import { useTranslation } from 'react-i18next';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useSwapHistory, useSwapTxHistoryVisible } from '../hooks/history';
+import { SwapHistoryItem } from '@/components2024/HistoryItem/SwapHistoryItem';
+import { makeBottomSheetProps } from '@/components2024/GlobalBottomSheetModal/utils-help';
+import { HistoryItemEntity } from '@/databases/entities/historyItem';
+import { naviPush } from '@/utils/navigation';
+import { ensureHistoryListItemFromDb } from '@/screens/Transaction/components/utils';
+import { syncSingleAddress } from '@/databases/hooks/history';
+import IconEmpty from '@/assets2024/images/lending/empty.png';
+import IconEmptyDark from '@/assets2024/images/lending/empty-dark.png';
+import { AddressItem } from '@/components2024/AddressItem/AddressItem';
+import { ellipsisAddress } from '@/utils/address';
+import { getPinnedTokenSnapshot } from '@/core/serviceApi/preference';
+import {
+  getTransactionHistoryCustomTxItemMap,
+  getTransactionHistoryTransactions,
+  transactionHistoryServiceApi,
+} from '@/core/serviceApi/transactionHistory';
+import {
+  switchSceneCurrentAccount,
+  useSceneAccountInfo,
+} from '@/hooks/accountsSwitcher';
+import { HistoryItemCateType } from '@/screens/Transaction/components/type';
+import type { HistoryDisplayItem } from '@/screens/Transaction/MultiAddressHistory';
+import { useHandleBackPressClosable } from '@/hooks/useAppGesture';
+import { useFocusEffect } from '@react-navigation/native';
+import { Text } from '@/components/Typography';
+import { notificationOpenapi } from '@/core/notifications/openapi';
+import { txResultToToHistoryDisplayItem } from '@/utils/transaction';
+import { useDebugSwapHistorySkipLocalLookup } from '@/hooks/appSettings';
+import { Account } from '@/types/account';
+import type { TransactionGroup } from '@/core/services/transactionHistory';
+
+const getStyle = createGetStyles2024(({ colors2024, isLight }) => ({
+  flatList: {
+    paddingHorizontal: 20,
+  },
+  headerTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    textAlign: 'center',
+    paddingBottom: 0,
+    color: colors2024['neutral-title-1'],
+    fontFamily: 'SF Pro Rounded',
+    backgroundColor: isLight
+      ? colors2024['neutral-bg-0']
+      : colors2024['neutral-bg-1'],
+  },
+  addressRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: '100%',
+    paddingHorizontal: 20,
+  },
+  walletIcon: {
+    borderRadius: 4,
+    width: 18,
+    height: 18,
+    marginRight: 4,
+  },
+  address: {
+    margin: 4,
+    fontFamily: 'SF Pro Rounded',
+    fontWeight: '700',
+    lineHeight: 20,
+    fontSize: 16,
+    color: colors2024['neutral-foot'],
+  },
+  skeletonBlock: {
+    width: '100%',
+    height: 74,
+    padding: 0,
+    borderRadius: 16,
+    marginTop: 8,
+  },
+  loading: {
+    marginTop: 8,
+  },
+  emptyView: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 16,
+    paddingTop: 150,
+  },
+  emptyText: {
+    textAlign: 'center',
+    fontSize: 16,
+    color: colors2024['neutral-info'],
+    fontFamily: 'SF Pro Rounded',
+  },
+  item: {
+    height: 8,
+  },
+}));
+
+const ItemSeparator = () => {
+  const { styles } = useTheme2024({ getStyle });
+  return <View style={styles.item} />;
+};
+
+const HistoryList = ({
+  onGotoDetail,
+  recentShowTime,
+}: {
+  onGotoDetail: (txId: string, chain: string) => void;
+  recentShowTime: number;
+}) => {
+  const { txList, loading, loadMore, noMore } = useSwapHistory();
+  const { t } = useTranslation();
+  const { styles, isLight } = useTheme2024({ getStyle });
+  const { finalSceneCurrentAccount: currentAccount } = useSceneAccountInfo({
+    forScene: 'MakeTransactionAbout',
+  });
+
+  const renderItem = useCallback(
+    ({ item }) => (
+      <TouchableOpacity onPress={() => onGotoDetail(item.tx_id, item.chain)}>
+        <SwapHistoryItem data={item} recentShowTime={recentShowTime} />
+      </TouchableOpacity>
+    ),
+    [onGotoDetail, recentShowTime],
+  );
+
+  const ListHeaderComponent = useCallback(() => {
+    return (
+      <View
+        style={{
+          marginBottom: 12,
+        }}>
+        <Text style={styles.headerTitle}>{t('page.swap.historyTitle')}</Text>
+        {Boolean(currentAccount) && (
+          <AddressItem account={currentAccount!}>
+            {({ WalletIcon, WalletAddress }) => {
+              return (
+                <View style={styles.addressRow}>
+                  <WalletIcon style={styles.walletIcon} />
+                  <Text
+                    numberOfLines={1}
+                    ellipsizeMode="tail"
+                    style={styles.address}>
+                    {currentAccount?.aliasName ||
+                      ellipsisAddress(currentAccount?.address || '')}
+                  </Text>
+                </View>
+              );
+            }}
+          </AddressItem>
+        )}
+      </View>
+    );
+  }, [styles, t, currentAccount]);
+
+  const ListEndLoader = useCallback(() => {
+    if (noMore) {
+      return null;
+    }
+    return <ActivityIndicator style={styles.loading} />;
+  }, [noMore, styles.loading]);
+  const { bottom } = useSafeAreaInsets();
+
+  const ListEmptyComponent = useMemo(
+    () =>
+      !loading && (!txList || !txList?.list?.length) ? (
+        <View style={styles.emptyView}>
+          <Image
+            source={isLight ? IconEmpty : IconEmptyDark}
+            width={160}
+            height={120}
+            style={{
+              width: 163,
+              height: 126,
+            }}
+          />
+          <Text style={styles.emptyText}>
+            {t('page.swap.no-transaction-records')}
+          </Text>
+        </View>
+      ) : loading ? (
+        <>
+          {Array.from({ length: 10 }).map((_, idx) => (
+            <Skeleton style={styles.skeletonBlock} key={idx} />
+          ))}
+        </>
+      ) : null,
+    [
+      loading,
+      txList,
+      styles.emptyView,
+      styles.emptyText,
+      styles.skeletonBlock,
+      isLight,
+      t,
+    ],
+  );
+
+  const sortedList = useMemo(() => {
+    if (!txList) {
+      return [];
+    }
+    return txList.list.sort((a, b) => {
+      // status pending first
+      if (a.status === 'Pending' && b.status !== 'Pending') {
+        return -1;
+      }
+      if (a.status !== 'Pending' && b.status === 'Pending') {
+        return 1;
+      }
+      return 0;
+    });
+  }, [txList]);
+
+  return (
+    <>
+      {ListHeaderComponent()}
+      <BottomSheetFlatList
+        contentContainerStyle={[
+          {
+            paddingBottom: 20 + bottom,
+          },
+        ]}
+        style={styles.flatList}
+        // stickyHeaderIndices={[0]}
+        // ListHeaderComponent={ListHeaderComponent}
+        data={sortedList}
+        ItemSeparatorComponent={ItemSeparator}
+        renderItem={renderItem}
+        keyExtractor={item => item.tx_id + item.chain}
+        onEndReached={loadMore}
+        onEndReachedThreshold={0.6}
+        ListFooterComponent={ListEndLoader}
+        ListEmptyComponent={ListEmptyComponent}
+      />
+    </>
+  );
+};
+
+export const SwapTxHistory = ({
+  isForMultipleAddress,
+  recentShowTime,
+}: {
+  isForMultipleAddress: boolean;
+  recentShowTime: number;
+}) => {
+  const bottomRef = useRef<BottomSheetModalMethods>(null);
+  const snapPoints = useMemo(() => [ModalLayouts.defaultHeightPercentText], []);
+  const { visible, setVisible } = useSwapTxHistoryVisible();
+  const { colors2024 } = useTheme2024({ getStyle });
+  const { t } = useTranslation();
+  const { finalSceneCurrentAccount: currentAccount } = useSceneAccountInfo({
+    forScene: 'MakeTransactionAbout',
+  });
+  const { debugSwapHistorySkipLocalLookup } =
+    useDebugSwapHistorySkipLocalLookup();
+
+  const onDismiss = useCallback(() => {
+    setVisible(false);
+  }, [setVisible]);
+
+  const goToDetail = useCallback(
+    async (txId: string, chain: string) => {
+      if (!debugSwapHistorySkipLocalLookup) {
+        const historyItem = await HistoryItemEntity.findOne({
+          where: { txHash: txId },
+        });
+        if (historyItem) {
+          onDismiss();
+          naviPush(RootNames.StackTransaction, {
+            screen: RootNames.HistoryDetail,
+            params: {
+              isForMultipleAddress,
+              data: {
+                ...ensureHistoryListItemFromDb(historyItem),
+              } as HistoryDisplayItem,
+              title: t('page.swap.swapped'),
+              treatSmallAssetsAsScam: true,
+              account: currentAccount,
+            },
+          });
+          return;
+        }
+
+        const { pendings, completeds } = await transactionHistoryServiceApi
+          .getList(currentAccount?.address ?? '')
+          .catch(error => {
+            console.error(
+              '[SwapTxHistory] load local transaction history failed',
+              error,
+            );
+            return {
+              pendings: [] as TransactionGroup[],
+              completeds: [] as TransactionGroup[],
+            };
+          });
+        const itemData = pendings
+          .concat(completeds)
+          .find(i => i.txs[0]?.hash === txId);
+        if (itemData) {
+          onDismiss();
+          naviPush(RootNames.StackTransaction, {
+            screen: RootNames.HistoryLocalDetail,
+            params: {
+              isForMultipleAddress,
+              data: itemData,
+              type: HistoryItemCateType.Swap,
+              title: t('page.swap.swapped'),
+              account: currentAccount,
+            },
+          });
+          return;
+        }
+      }
+
+      // Fallback: fetch single tx detail from API for transactions older than
+      // 90 days that are not persisted locally
+      console.debug(
+        '[SwapTxHistory] goToDetail: tx not found locally, fetching from API',
+        txId,
+        chain,
+      );
+      const txDetail = await notificationOpenapi
+        .getUserTxDetail({
+          chainId: chain,
+          txId,
+          userAddr: currentAccount?.address ?? '',
+        })
+        .catch(err => {
+          console.error(
+            '[SwapTxHistory] goToDetail: getUserTxDetail failed',
+            err,
+          );
+          return null;
+        });
+
+      if (!txDetail) {
+        return;
+      }
+
+      const pinedQueue = getPinnedTokenSnapshot();
+      const [customTxItemsMap, transactions] = await Promise.all([
+        getTransactionHistoryCustomTxItemMap(),
+        getTransactionHistoryTransactions(),
+      ]);
+      const historyDisplayItem = txResultToToHistoryDisplayItem({
+        address: currentAccount?.address || '',
+        res: txDetail,
+        pinedQueue,
+        customTxItemsMap,
+        transactions,
+      })[0];
+
+      if (historyDisplayItem) {
+        onDismiss();
+        naviPush(RootNames.StackTransaction, {
+          screen: RootNames.HistoryDetail,
+          params: {
+            isForMultipleAddress,
+            data: historyDisplayItem,
+            title: t('page.swap.swapped'),
+            treatSmallAssetsAsScam: true,
+            account: currentAccount,
+          },
+        });
+      }
+    },
+    [
+      debugSwapHistorySkipLocalLookup,
+      currentAccount,
+      onDismiss,
+      isForMultipleAddress,
+      t,
+    ],
+  );
+
+  useEffect(() => {
+    if (visible) {
+      bottomRef.current?.present();
+    } else {
+      bottomRef.current?.dismiss();
+    }
+  }, [visible]);
+
+  const isDarkTheme = useGetBinaryMode() === 'dark';
+
+  useEffect(() => {
+    if (currentAccount?.address) {
+      syncSingleAddress(currentAccount?.address);
+    }
+  }, [currentAccount?.address]);
+
+  const { onHardwareBackHandler } = useHandleBackPressClosable(
+    useCallback(() => {
+      bottomRef.current?.dismiss();
+      return !visible;
+    }, [visible]),
+    { autoEffectEnabled: false },
+  );
+
+  useFocusEffect(onHardwareBackHandler);
+
+  return (
+    <AppBottomSheetModal
+      ref={bottomRef}
+      snapPoints={snapPoints}
+      onDismiss={onDismiss}
+      enableDismissOnClose
+      {...makeBottomSheetProps({
+        colors: colors2024,
+        linearGradientType: isDarkTheme ? 'bg1' : 'bg0',
+      })}>
+      <HistoryList onGotoDetail={goToDetail} recentShowTime={recentShowTime} />
+    </AppBottomSheetModal>
+  );
+};

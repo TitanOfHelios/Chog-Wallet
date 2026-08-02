@@ -1,0 +1,162 @@
+import { CHAINS_ENUM } from '@/constant/chains';
+import { lendingServiceApi } from '@/core/serviceApi/lending';
+import type { LendingServiceStore } from '@/core/services/lendingService';
+import { useMemoizedFn } from 'ahooks';
+import { atom, useAtom } from 'jotai';
+import { useMemo } from 'react';
+import { CustomMarket } from '../config/market';
+import { jotaiStore } from '@/core/utils/reexports';
+import type { LendingService } from '@/core/services/lendingService';
+
+export const lendingAtom = atom<LendingServiceStore>({
+  lastSelectedChain: CustomMarket.proto_mainnet_v3,
+  skipHealthFactorWarning: false,
+});
+let lastSelectedChainRevision = 0;
+let skipHealthFactorWarningRevision = 0;
+
+export function prepareLendingStoreFromService(service: LendingService) {
+  lastSelectedChainRevision += 1;
+  skipHealthFactorWarningRevision += 1;
+  jotaiStore.set(lendingAtom, {
+    lastSelectedChain: service.getLastSelectedChain(),
+    skipHealthFactorWarning: service.getSkipHealthFactorWarning(),
+  });
+}
+
+lendingAtom.onMount = setter => {
+  const chainRevision = lastSelectedChainRevision;
+  const warningRevision = skipHealthFactorWarningRevision;
+  Promise.all([
+    lendingServiceApi.getLastSelectedChain(),
+    lendingServiceApi.getSkipHealthFactorWarning(),
+  ])
+    .then(([chainId, skipWarning]) => {
+      setter(previous => ({
+        lastSelectedChain:
+          chainRevision === lastSelectedChainRevision
+            ? chainId
+            : previous.lastSelectedChain,
+        skipHealthFactorWarning:
+          warningRevision === skipHealthFactorWarningRevision
+            ? skipWarning
+            : previous.skipHealthFactorWarning,
+      }));
+    })
+    .catch(error => {
+      console.error('Failed to initialize lending service state:', error);
+    });
+};
+
+export const useLendingService = () => {
+  const [lendingStore, setLendingStore] = useAtom(lendingAtom);
+
+  const lastSelectedChain = useMemo(() => {
+    return lendingStore.lastSelectedChain || CustomMarket.proto_mainnet_v3;
+  }, [lendingStore.lastSelectedChain]);
+
+  const skipHealthFactorWarning = useMemo(() => {
+    return lendingStore.skipHealthFactorWarning || false;
+  }, [lendingStore.skipHealthFactorWarning]);
+
+  const setLastSelectedChain = useMemoizedFn(async (chainId: CustomMarket) => {
+    const revision = ++lastSelectedChainRevision;
+    try {
+      await lendingServiceApi.setLastSelectedChain(chainId);
+      if (revision === lastSelectedChainRevision) {
+        setLendingStore(prev => ({
+          ...prev,
+          lastSelectedChain: chainId,
+        }));
+      }
+    } catch (error) {
+      console.error('Failed to set last selected chain:', error);
+    }
+  });
+
+  const getLastSelectedChain = useMemoizedFn(async () => {
+    const revision = lastSelectedChainRevision;
+    try {
+      const chainId = await lendingServiceApi.getLastSelectedChain();
+      if (revision === lastSelectedChainRevision) {
+        setLendingStore(prev => ({
+          ...prev,
+          lastSelectedChain: chainId,
+        }));
+      }
+      return chainId;
+    } catch (error) {
+      console.error('Failed to get last selected chain:', error);
+      return CHAINS_ENUM.ETH;
+    }
+  });
+
+  const setSkipHealthFactorWarning = useMemoizedFn(async (skip: boolean) => {
+    const revision = ++skipHealthFactorWarningRevision;
+    try {
+      await lendingServiceApi.setSkipHealthFactorWarning(skip);
+      if (revision === skipHealthFactorWarningRevision) {
+        setLendingStore(prev => ({
+          ...prev,
+          skipHealthFactorWarning: skip,
+        }));
+      }
+    } catch (error) {
+      console.error('Failed to set skip health factor warning:', error);
+    }
+  });
+
+  const getSkipHealthFactorWarning = useMemoizedFn(async () => {
+    const revision = skipHealthFactorWarningRevision;
+    try {
+      const skip = await lendingServiceApi.getSkipHealthFactorWarning();
+      if (revision === skipHealthFactorWarningRevision) {
+        setLendingStore(prev => ({
+          ...prev,
+          skipHealthFactorWarning: skip,
+        }));
+      }
+      return skip;
+    } catch (error) {
+      console.error('Failed to get skip health factor warning:', error);
+      return false;
+    }
+  });
+
+  const syncState = useMemoizedFn(async () => {
+    const chainRevision = lastSelectedChainRevision;
+    const warningRevision = skipHealthFactorWarningRevision;
+    try {
+      const [chainId, skipWarning] = await Promise.all([
+        lendingServiceApi.getLastSelectedChain(),
+        lendingServiceApi.getSkipHealthFactorWarning(),
+      ]);
+
+      setLendingStore(previous => ({
+        lastSelectedChain:
+          chainRevision === lastSelectedChainRevision
+            ? chainId
+            : previous.lastSelectedChain,
+        skipHealthFactorWarning:
+          warningRevision === skipHealthFactorWarningRevision
+            ? skipWarning
+            : previous.skipHealthFactorWarning,
+      }));
+    } catch (error) {
+      console.error('Failed to sync lending service state:', error);
+    }
+  });
+
+  return {
+    lastSelectedChain,
+    skipHealthFactorWarning,
+    lendingStore,
+
+    setLastSelectedChain,
+    getLastSelectedChain,
+    setSkipHealthFactorWarning,
+    getSkipHealthFactorWarning,
+
+    syncState,
+  };
+};

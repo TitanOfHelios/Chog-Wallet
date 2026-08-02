@@ -1,0 +1,250 @@
+import { RcIconLong, RcIconShort } from '@/assets2024/icons/perps';
+import { AssetAvatar } from '@/components';
+import { MarketData } from '@/hooks/perps/usePerpsStore';
+import { useTheme2024 } from '@/hooks/theme';
+import { splitNumberByStep } from '@/utils/number';
+import { formatPerpsCoin } from '@/utils/perps';
+import { createGetStyles2024 } from '@/utils/styles';
+import { sinceTime } from '@/utils/time';
+import { WsFill } from '@rabby-wallet/hyperliquid-sdk';
+import React, { memo, useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
+import { TouchableOpacity, View } from 'react-native';
+import FastImage from 'react-native-fast-image';
+import { Text } from '@/components/Typography';
+import { SPOT_STABLE_COIN_NAME } from '../PerpsSpotSwapPopup';
+import RcIconUSDT from '@/assets2024/icons/perps/IconUSDT.svg';
+import RcIconUSDH from '@/assets2024/icons/perps/IconUSDH.svg';
+import RcIconUSDE from '@/assets2024/icons/perps/IconUSDE.svg';
+
+export interface PerpsHistoryItemProps {
+  fill: WsFill;
+  marketData: Record<string, MarketData>;
+  onPress?: (fill: WsFill) => void;
+  orderTpOrSl?: 'tp' | 'sl';
+}
+
+const PerpsHistoryItemComponent: React.FC<PerpsHistoryItemProps> = ({
+  fill,
+  orderTpOrSl,
+  marketData,
+  onPress,
+}) => {
+  const { styles, colors2024 } = useTheme2024({ getStyle });
+  const { t } = useTranslation();
+
+  const { coin, closedPnl: _closedPnl, dir, fee, px } = fill as WsFill;
+  const staleCoinName = useMemo(() => {
+    if (coin === SPOT_STABLE_COIN_NAME.USDT) {
+      return 'USDT';
+    }
+    if (coin === SPOT_STABLE_COIN_NAME.USDE) {
+      return 'USDE';
+    }
+    if (coin === SPOT_STABLE_COIN_NAME.USDH) {
+      return 'USDH';
+    }
+    return '';
+  }, [coin]);
+  const titleString = useMemo(() => {
+    if (staleCoinName) {
+      return fill?.dir + ' ' + staleCoinName;
+    }
+
+    const isLiquidation = Boolean(fill?.liquidation);
+    if (fill?.dir === 'Close Long') {
+      if (orderTpOrSl === 'tp') {
+        return t('page.perps.history.closeLongTp');
+      }
+      if (orderTpOrSl === 'sl') {
+        return t('page.perps.history.closeLongSl');
+      }
+
+      return isLiquidation
+        ? t('page.perps.history.closeLongLiquidation')
+        : t('page.perps.history.closeLong');
+    }
+    if (fill?.dir === 'Close Short') {
+      if (orderTpOrSl === 'tp') {
+        return t('page.perps.history.closeShortTp');
+      }
+      if (orderTpOrSl === 'sl') {
+        return t('page.perps.history.closeShortSl');
+      }
+
+      return isLiquidation
+        ? t('page.perps.history.closeShortLiquidation')
+        : t('page.perps.history.closeShort');
+    }
+    if (fill?.dir === 'Open Long') {
+      return t('page.perps.history.openLong');
+    }
+    if (fill?.dir === 'Open Short') {
+      return t('page.perps.history.openShort');
+    }
+    return fill?.dir;
+  }, [fill?.dir, fill?.liquidation, orderTpOrSl, t, staleCoinName]);
+
+  const itemData = marketData[coin];
+  const quoteAsset = itemData?.quoteAsset || 'USDC';
+  const logoUrl = itemData?.logoUrl;
+  const pxDecimals = itemData?.pxDecimals;
+  const isClose = (dir === 'Close Long' || dir === 'Close Short') && _closedPnl;
+  const direction =
+    dir === 'Close Long' || dir === 'Open Long' ? 'Long' : 'Short';
+  const closedPnl = Number(_closedPnl) - Number(fee);
+  const pnlValue = closedPnl ? closedPnl : 0;
+
+  const isStableCoinTrade = Boolean(staleCoinName);
+
+  const StableCoinAvatar = useMemo(() => {
+    if (!isStableCoinTrade) {
+      return null;
+    }
+
+    const componentsMap: Record<string, React.ReactNode> = {
+      USDT: <RcIconUSDT width={46} height={46} />,
+      USDH: <RcIconUSDH width={46} height={46} />,
+      USDE: <RcIconUSDE width={46} height={46} />,
+    };
+
+    return componentsMap[staleCoinName] || null;
+  }, [isStableCoinTrade, staleCoinName]);
+
+  return (
+    <TouchableOpacity onPress={() => onPress?.(fill)}>
+      <View style={styles.card}>
+        <View style={styles.iconContainer}>
+          {isStableCoinTrade ? (
+            StableCoinAvatar
+          ) : (
+            <AssetAvatar logo={logoUrl} logoStyle={styles.icon} size={46} />
+          )}
+          {isStableCoinTrade ? null : direction === 'Long' ? (
+            <RcIconLong
+              style={styles.directionIcon}
+              bgColor={colors2024['neutral-bg-1']}
+              color={colors2024['neutral-title-1']}
+            />
+          ) : (
+            <RcIconShort
+              style={styles.directionIcon}
+              bgColor={colors2024['neutral-bg-1']}
+              color={colors2024['neutral-title-1']}
+            />
+          )}
+        </View>
+        <View style={styles.content}>
+          <View style={styles.row}>
+            <Text style={styles.name}>{titleString}</Text>
+          </View>
+          <View style={styles.row}>
+            {isStableCoinTrade ? (
+              <Text style={styles.coin}>{t('page.swap.Completed')}</Text>
+            ) : (
+              <Text style={styles.coin}>
+                {formatPerpsCoin(coin)}-{quoteAsset} @$
+                {Number(px).toFixed(pxDecimals)}
+              </Text>
+            )}
+          </View>
+        </View>
+        <View style={styles.extra}>
+          {isClose ? (
+            <Text style={[styles.pnl, pnlValue < 0 ? styles.pnlRed : null]}>
+              {pnlValue > 0 ? '+' : '-'}$
+              {splitNumberByStep(Math.abs(pnlValue).toFixed(2))}
+            </Text>
+          ) : null}
+          <Text style={styles.time}>{sinceTime(fill.time / 1000)}</Text>
+        </View>
+      </View>
+    </TouchableOpacity>
+  );
+};
+
+export const PerpsHistoryItem = memo(PerpsHistoryItemComponent);
+
+const getStyle = createGetStyles2024(({ colors2024, isLight }) => ({
+  card: {
+    borderRadius: 16,
+    paddingVertical: 14,
+    paddingHorizontal: 12,
+    backgroundColor: isLight
+      ? colors2024['neutral-bg-1']
+      : colors2024['neutral-bg-2'],
+    display: 'flex',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  iconContainer: {
+    position: 'relative',
+    flexShrink: 0,
+  },
+  directionIcon: {
+    position: 'absolute',
+    bottom: 0,
+    right: 0,
+    width: 20,
+    height: 20,
+  },
+  icon: {
+    width: 46,
+    height: 46,
+    borderRadius: 1000,
+  },
+  content: {
+    flex: 1,
+
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 4,
+  },
+  row: {
+    display: 'flex',
+    flexDirection: 'row',
+    alignItems: 'center',
+    // justifyContent: 'space-between',
+  },
+  name: {
+    fontFamily: 'SF Pro Rounded',
+    fontSize: 16,
+    lineHeight: 20,
+    fontWeight: '700',
+    color: colors2024['neutral-title-1'],
+  },
+  extra: {
+    flexShrink: 0,
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 4,
+    alignItems: 'flex-end',
+    justifyContent: 'center',
+  },
+  pnl: {
+    fontFamily: 'SF Pro Rounded',
+    fontSize: 16,
+    lineHeight: 20,
+    fontWeight: '700',
+    color: colors2024['green-default'],
+  },
+  pnlRed: {
+    color: colors2024['red-default'],
+  },
+  coin: {
+    fontFamily: 'SF Pro Rounded',
+    fontSize: 14,
+    lineHeight: 18,
+    fontWeight: '500',
+    color: colors2024['neutral-secondary'],
+    whiteSpace: 'nowrap',
+  },
+  time: {
+    fontFamily: 'SF Pro Rounded',
+    fontSize: 14,
+    lineHeight: 18,
+    fontWeight: '500',
+    color: colors2024['neutral-secondary'],
+  },
+}));

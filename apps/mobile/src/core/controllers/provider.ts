@@ -1,0 +1,2183 @@
+import type {
+  AuthorizationList,
+  AuthorizationListBytes,
+  AuthorizationListItem,
+} from '@ethereumjs/common';
+import { Common, Hardfork } from '@ethereumjs/common';
+import type { FeeMarketEIP1559TxData } from '@ethereumjs/tx';
+import { TransactionFactory } from '@ethereumjs/tx';
+import {
+  bufferToHex,
+  isHexString,
+  addHexPrefix,
+  intToHex,
+} from 'ethereumjs-util';
+import { stringToHex } from 'web3-utils';
+import { ethErrors } from 'eth-rpc-errors';
+import {
+  normalize as normalizeAddress,
+  recoverPersonalSignature,
+} from '@metamask/eth-sig-util';
+import cloneDeep from 'lodash/cloneDeep';
+import { openapi } from '../request';
+import { bridgeServiceApi } from '@/core/serviceApi/bridge';
+import { customRPCServiceApi } from '@/core/serviceApi/customRPC';
+import { customTestnetServiceApi } from '@/core/serviceApi/customTestnet';
+import {
+  disconnectDappSync,
+  getConnectedDappSnapshot,
+  getDappSnapshot,
+  isInternalDappSnapshot,
+  updateDappSync,
+} from '@/core/serviceApi/dapp';
+import { keyringServiceApi } from '@/core/serviceApi/keyring';
+import {
+  getNotificationStatsDataSnapshot,
+  setNotificationStatsDataSync,
+} from '@/core/serviceApi/notification';
+import { broadcastSessionEventSync } from '@/core/serviceApi/session';
+import { swapServiceApi } from '@/core/serviceApi/swap';
+import { transactionBroadcastWatcherServiceApi } from '@/core/serviceApi/transactionBroadcastWatcher';
+import { transactionHistoryServiceApi } from '@/core/serviceApi/transactionHistory';
+import { transactionWatcherServiceApi } from '@/core/serviceApi/transactionWatcher';
+// import {
+//   transactionWatchService,
+//   transactionHistoryService,
+//   signTextHistoryService,
+//   RPCService,
+//   swapService,
+//   transactionBroadcastWatchService,
+//   notificationService,
+// } from 'background/service';
+// import { Session } from 'background/service/session';
+import {
+  KEYRING_CATEGORY_MAP,
+  KEYRING_TYPE,
+} from '@rabby-wallet/keyring-utils';
+import type { Tx, TxPushType } from '@rabby-wallet/rabby-api/dist/types';
+import RpcCache from '../utils/rpcCache';
+// import Wallet from '../wallet';
+import { CHAINS_ENUM } from '@/constant/chains';
+import { SAFE_RPC_METHODS } from '@/constant/rpc';
+import BaseController from './base';
+import type { Account } from '@/types/account';
+import BigNumber from 'bignumber.js';
+// import { formatTxMetaForRpcResult } from 'background/utils/tx';
+import { findChain, findChainByEnum } from '@/utils/chain';
+import { is1559Tx, is7702Tx, validateGasPriceRange } from '@/utils/transaction';
+import { eventBus, EVENTS } from '@/utils/events';
+import { BroadcastEvent } from '@/constant/event';
+import { createDappBySession } from '@/core/utils/createDappBySession';
+import { INTERNAL_REQUEST_ORIGIN, INTERNAL_REQUEST_SESSION } from '@/constant';
+import { matomoRequestEvent } from '@/utils/analytics';
+import { stats } from '@/utils/stats';
+import type { StatsData } from '../services/notification';
+import { ethers } from 'ethers';
+import { getGlobalProvider } from '../apis/globalProvider';
+import { bytesToHex } from '@ethereumjs/util';
+import type { CustomTestnetTokenBase } from '@/types/customTestnet';
+// import { updateExpiredTime } from '@/databases/sync/assets';
+import { PENDGING_TIME } from '@/constant/expireTime';
+import { isString } from 'lodash';
+import { updateExpiredTime } from '@/databases/sync/utils';
+import { assertProviderRequest } from '../utils/assertProviderRequest';
+import type { ProviderRequest } from './type';
+import { hexToNumber, isAddress, toHex } from 'viem';
+import { getProviderRequestChain } from './requestContext';
+import { Transaction as ViemTempoTransaction } from 'viem/tempo';
+import { add0x } from '@/utils/address';
+import { removeLeadingZeroes } from '@/utils/7702';
+import { handleGasAccountLoginSuccess } from '@/utils/gasAccountAnalytics';
+import type { TempoTxCall, TxWithTempoExtras } from '@/utils/tempo';
+import { shouldUseTempoTransaction } from '@/utils/tempo';
+// import eventBus from '@/eventBus';
+
+const SIGN_TIMEOUT = 100;
+
+const reportSignText = (params: {
+  method: string;
+  account: Account;
+  success: boolean;
+}) => {
+  const { method, account, success } = params;
+  matomoRequestEvent({
+    category: 'SignText',
+    action: 'completeSignText',
+    label: [
+      KEYRING_CATEGORY_MAP[account.type],
+      account.brandName,
+      success,
+    ].join('|'),
+  });
+  stats.report('completeSignText', {
+    type: account.brandName,
+    category: KEYRING_CATEGORY_MAP[account.type],
+    method,
+    success,
+  });
+};
+
+const setStatsDataWithExistingSignMethod = (statsData: StatsData) => {
+  const signMethod = getNotificationStatsDataSnapshot()?.signMethod;
+  if (signMethod) {
+    statsData.signMethod = signMethod;
+  }
+  setNotificationStatsDataSync(statsData);
+};
+
+const covertToHex = (data: Buffer | bigint) => {
+  if (typeof data === 'bigint') {
+    return `0x${data.toString(16)}`;
+  }
+  return bufferToHex(data);
+};
+
+const toBigIntSafe = (value: unknown): bigint | undefined => {
+  if (value === null || typeof value === 'undefined') {
+    return undefined;
+  }
+  try {
+    if (typeof value === 'bigint') {
+      return value;
+    }
+    if (typeof value === 'number') {
+      return BigInt(value);
+    }
+    if (typeof value === 'string') {
+      if (!value.length) {
+        return undefined;
+      }
+      return BigInt(value);
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+};
+
+const toNumberSafe = (value: unknown): number | undefined => {
+  if (value === null || typeof value === 'undefined') {
+    return undefined;
+  }
+  if (typeof value === 'number') {
+    return value;
+  }
+  if (typeof value === 'string' && value.length) {
+    try {
+      return Number(BigInt(value));
+    } catch {
+      return Number(value);
+    }
+  }
+  return undefined;
+};
+
+const omitUndefined = <T extends Record<string, any>>(obj: T) => {
+  return Object.fromEntries(
+    Object.entries(obj).filter(([, value]) => typeof value !== 'undefined'),
+  ) as Partial<T>;
+};
+
+const isSimpleOrHdKeyringType = (type?: string) => {
+  return type === KEYRING_TYPE.SimpleKeyring || type === KEYRING_TYPE.HdKeyring;
+};
+
+const normalizeHexValue = (value: unknown) => {
+  if (value === null || typeof value === 'undefined') {
+    return undefined;
+  }
+  if (typeof value === 'string') {
+    if (!value.length || value === '0x' || value === '0X') {
+      return '0x0';
+    }
+    return value;
+  }
+  return value;
+};
+
+const optionalValue = <T>(value: T | null | undefined) => {
+  return value === null || typeof value === 'undefined' ? undefined : value;
+};
+
+const normalizeSerializedTxHex = (serializedTx?: string) => {
+  if (!serializedTx || typeof serializedTx !== 'string') {
+    return undefined;
+  }
+  let normalized = serializedTx.trim();
+  if (/^0x0x/i.test(normalized)) {
+    normalized = `0x${normalized.slice(4)}`;
+  }
+  return normalized as `0x${string}`;
+};
+
+const normalizeTempoCalls = (params: {
+  approvalRes: TxWithTempoExtras<ApprovalRes>;
+  txParams: Record<string, any>;
+}): TempoTxCall[] => {
+  const { approvalRes, txParams } = params;
+  const typedApprovalRes = approvalRes as any;
+
+  const rawCalls =
+    Array.isArray(typedApprovalRes.calls) && typedApprovalRes.calls.length
+      ? typedApprovalRes.calls
+      : [
+          {
+            to: approvalRes.to ?? txParams.to,
+            data:
+              typeof approvalRes.data !== 'undefined'
+                ? approvalRes.data
+                : txParams.data,
+            value:
+              typeof approvalRes.value !== 'undefined'
+                ? approvalRes.value
+                : txParams.value,
+          },
+        ];
+
+  return rawCalls.map((call: any) =>
+    omitUndefined({
+      to: call?.to ?? approvalRes.to ?? txParams.to,
+      data:
+        typeof call?.data !== 'undefined'
+          ? call.data
+          : typeof approvalRes.data !== 'undefined'
+          ? approvalRes.data
+          : txParams.data,
+      value: normalizeHexValue(
+        typeof call?.value !== 'undefined'
+          ? call.value
+          : typeof approvalRes.value !== 'undefined'
+          ? approvalRes.value
+          : txParams.value,
+      ),
+    }),
+  );
+};
+
+const toTempoRpcQuantity = (value: unknown) => {
+  if (value === null || typeof value === 'undefined') {
+    return undefined;
+  }
+  if (typeof value === 'string') {
+    return normalizeHexValue(value);
+  }
+  if (typeof value === 'bigint' || typeof value === 'number') {
+    return toHex(value);
+  }
+  return undefined;
+};
+
+const buildTempoSubmitTxFromSerialized = (params: {
+  serializedTx?: `0x${string}`;
+  approvalRes: ApprovalRes;
+  fallbackCalls?: Array<Record<string, any>>;
+  shouldIgnoreFeeToken?: boolean;
+}) => {
+  const { serializedTx, approvalRes, fallbackCalls, shouldIgnoreFeeToken } =
+    params;
+  const normalizedSerializedTx = normalizeSerializedTxHex(serializedTx);
+  if (!normalizedSerializedTx) {
+    return undefined;
+  }
+  if (!/^0x[0-9a-fA-F]+$/.test(normalizedSerializedTx)) {
+    return undefined;
+  }
+  if (!normalizedSerializedTx.toLowerCase().startsWith('0x76')) {
+    return undefined;
+  }
+
+  let parsed: any;
+  try {
+    parsed = ViemTempoTransaction.deserialize(normalizedSerializedTx) as any;
+  } catch {
+    return undefined;
+  }
+
+  const calls = Array.isArray(parsed?.calls)
+    ? parsed.calls.map((call: any) =>
+        omitUndefined({
+          to: call?.to,
+          data: call?.data,
+          value: toTempoRpcQuantity(call?.value),
+        }),
+      )
+    : (fallbackCalls || []).map(call =>
+        omitUndefined({
+          to: call?.to,
+          data: call?.data,
+          value: normalizeHexValue(call?.value),
+        }),
+      );
+
+  return omitUndefined({
+    chainId:
+      typeof parsed?.chainId === 'number'
+        ? parsed.chainId
+        : Number(approvalRes.chainId),
+    type: '0x76',
+    from: parsed?.from || approvalRes.from,
+    gas: toTempoRpcQuantity(parsed?.gas),
+    gasLimit: toTempoRpcQuantity(parsed?.gas),
+    gasPrice: toTempoRpcQuantity(parsed?.gasPrice),
+    maxFeePerGas: toTempoRpcQuantity(parsed?.maxFeePerGas),
+    maxPriorityFeePerGas: toTempoRpcQuantity(parsed?.maxPriorityFeePerGas),
+    nonce: toTempoRpcQuantity(parsed?.nonce),
+    calls,
+    nonceKey: toTempoRpcQuantity(parsed?.nonceKey),
+    keyAuthorization:
+      typeof parsed?.keyAuthorization === 'undefined'
+        ? (approvalRes as any).keyAuthorization
+        : parsed.keyAuthorization,
+    validBefore: toTempoRpcQuantity(parsed?.validBefore),
+    validAfter: toTempoRpcQuantity(parsed?.validAfter),
+    feePayerSignature: optionalValue(parsed?.feePayerSignature),
+    feeToken: shouldIgnoreFeeToken
+      ? undefined
+      : (parsed?.feeToken as any) || (approvalRes as any).feeToken,
+  } as any);
+};
+
+const buildTempoSubmitTxFallback = (params: {
+  approvalRes: ApprovalRes;
+  fallbackCalls?: Array<Record<string, any>>;
+  shouldIgnoreFeeToken?: boolean;
+}) => {
+  const { approvalRes, fallbackCalls, shouldIgnoreFeeToken } = params;
+  return omitUndefined({
+    chainId: approvalRes.chainId,
+    type: '0x76',
+    from: approvalRes.from,
+    gas: approvalRes.gas,
+    gasLimit: approvalRes.gasLimit || approvalRes.gas,
+    gasPrice: approvalRes.gasPrice,
+    maxFeePerGas: approvalRes.maxFeePerGas,
+    maxPriorityFeePerGas: approvalRes.maxPriorityFeePerGas,
+    nonce: approvalRes.nonce,
+    calls: (fallbackCalls || []).map(call =>
+      omitUndefined({
+        to: call?.to,
+        data: call?.data,
+        value: normalizeHexValue(call?.value),
+      }),
+    ),
+    nonceKey: (approvalRes as any).nonceKey,
+    keyAuthorization: (approvalRes as any).keyAuthorization,
+    validBefore: (approvalRes as any).validBefore,
+    validAfter: (approvalRes as any).validAfter,
+    feePayerSignature: optionalValue((approvalRes as any).feePayerSignature),
+    feeToken: shouldIgnoreFeeToken ? undefined : (approvalRes as any).feeToken,
+  } as any);
+};
+
+const parseTempoSignature = (signature: string) => {
+  const signatureHex = add0x(signature);
+  if (!isHexString(signatureHex) || signatureHex.length < 132) {
+    throw new Error('invalid tempo signature');
+  }
+  const rHex = `0x${signatureHex.slice(2, 66)}`;
+  const sHex = `0x${signatureHex.slice(66, 130)}`;
+  const v = parseInt(signatureHex.slice(130, 132), 16);
+  const yParity = v === 27 || v === 28 ? v - 27 : v & 1;
+
+  return {
+    r: BigInt(rHex),
+    s: BigInt(sHex),
+    v: BigInt(v),
+    yParity,
+  };
+};
+
+const normalizeTempoSecp256k1Signature = (signature: unknown) => {
+  if (signature === null || typeof signature === 'undefined') {
+    return signature;
+  }
+
+  if (typeof signature === 'string') {
+    const parsed = parseTempoSignature(signature);
+    return {
+      r: parsed.r,
+      s: parsed.s,
+      yParity: parsed.yParity,
+    };
+  }
+
+  if (typeof signature !== 'object') {
+    return undefined;
+  }
+
+  const sig = signature as any;
+  const r = toBigIntSafe(sig.r);
+  const s = toBigIntSafe(sig.s);
+  const yParityCandidate = toNumberSafe(
+    typeof sig.yParity !== 'undefined' ? sig.yParity : sig.v,
+  );
+  const yParity =
+    typeof yParityCandidate === 'number'
+      ? yParityCandidate >= 27
+        ? yParityCandidate - 27
+        : yParityCandidate
+      : undefined;
+
+  if (
+    typeof r === 'bigint' &&
+    typeof s === 'bigint' &&
+    typeof yParity === 'number'
+  ) {
+    return { r, s, yParity };
+  }
+
+  return undefined;
+};
+
+export interface AddEthereumChainParams {
+  chainId: string;
+  chainName: string;
+  nativeCurrency: {
+    name: string;
+    symbol: string;
+    decimals: number;
+  };
+  rpcUrls: string[];
+  blockExplorerUrls: string[];
+}
+
+interface ApprovalRes extends Tx {
+  type?: string;
+  address?: string;
+  uiRequestComponent?: string;
+  isSend?: boolean;
+  isSpeedUp?: boolean;
+  isCancel?: boolean;
+  isSwap?: boolean;
+  isGnosis?: boolean;
+  account?: Account;
+  extra?: Record<string, any>;
+  traceId?: string;
+  $ctx?: any;
+  signingTxId?: string;
+  pushType?: TxPushType;
+  lowGasDeadline?: number;
+  reqId?: string;
+  isGasLess?: boolean;
+  isGasAccount?: boolean;
+  logId?: string;
+  sig?: string;
+  $account?: Account;
+  authorizationList?: AuthorizationListBytes | AuthorizationList | never;
+}
+
+interface Web3WalletPermission {
+  // The name of the method corresponding to the permission
+  parentCapability: string;
+
+  // The date the permission was granted, in UNIX epoch time
+  date?: number;
+}
+
+type SignTypeDataParams = string[];
+type Session = {
+  icon: string;
+  name: string;
+  origin: string;
+};
+
+const v1SignTypedDataVlidation = ({
+  data: {
+    params: [_, from],
+  },
+  account,
+}: {
+  data: {
+    params: SignTypeDataParams;
+  };
+  account?: Account | null;
+}) => {
+  const currentAddress = account?.address?.toLowerCase();
+  if (from.toLowerCase() !== currentAddress)
+    throw ethErrors.rpc.invalidParams('from should be same as current address');
+};
+
+const signTypedDataVlidation = (
+  req: ProviderRequest & {
+    data: {
+      params: SignTypeDataParams;
+    };
+    session: Session;
+    account?: Account | null;
+  },
+) => {
+  const {
+    data: {
+      params: [from, data],
+    },
+    session,
+    account,
+  } = req;
+  let jsonData;
+  try {
+    jsonData = JSON.parse(data);
+  } catch (e) {
+    throw ethErrors.rpc.invalidParams('data is not a validate JSON string');
+  }
+  if (!isInternalDappSnapshot(session.origin)) {
+    const currentChain =
+      getProviderRequestChain(req)?.enum ||
+      getDappSnapshot(session.origin)?.chainId;
+
+    if (jsonData.domain.chainId) {
+      const chainItem = findChainByEnum(currentChain);
+      if (
+        !currentChain ||
+        (chainItem && Number(jsonData.domain.chainId) !== chainItem.id)
+      ) {
+        throw ethErrors.rpc.invalidParams(
+          'chainId should be same as current chainId',
+        );
+      }
+    }
+  }
+  const currentAddress = account?.address.toLowerCase();
+  if (from?.toLowerCase() !== currentAddress)
+    throw ethErrors.rpc.invalidParams('from should be same as current address');
+};
+
+interface RPCRequest {
+  method: string;
+  params: any[];
+}
+
+interface ControllerParams<T> {
+  data: {
+    params: T;
+  };
+  session: Session;
+  approvalRes: ApprovalRes;
+}
+
+class ProviderController extends BaseController {
+  @Reflect.metadata('PRIVATE', true)
+  ethRpc = async (
+    req: ProviderRequest & {
+      data: RPCRequest;
+      session: Session;
+      account?: Account | null;
+    },
+    forceChainServerId?: string,
+  ) => {
+    const {
+      data: { method, params },
+      session: { origin },
+    } = req;
+
+    if (
+      !getDappSnapshot(origin)?.isConnected &&
+      !SAFE_RPC_METHODS.includes(method)
+    ) {
+      throw ethErrors.provider.unauthorized();
+    }
+
+    const site = getDappSnapshot(origin);
+    let chainServerId = findChain({ enum: CHAINS_ENUM.ETH })!.serverId;
+    if (site) {
+      chainServerId =
+        findChain({ enum: site.chainId })?.serverId || chainServerId;
+    }
+    const requestChain = getProviderRequestChain(req);
+    if (requestChain) {
+      chainServerId = requestChain.serverId;
+    }
+    if (forceChainServerId) {
+      chainServerId = forceChainServerId;
+    }
+
+    const currentAddress = req?.account?.address.toLowerCase() || '0x';
+    const cache = RpcCache.get(currentAddress, {
+      method,
+      params,
+      chainId: chainServerId,
+    });
+    if (cache) {
+      return cache;
+    }
+
+    const chain = findChain({
+      serverId: chainServerId,
+    })!;
+    if (!chain?.isTestnet) {
+      if (await customRPCServiceApi.hasCustomRPC(chain.enum)) {
+        const promise = customRPCServiceApi
+          .requestCustomRPC(chain.enum, method, params)
+          .then(result => {
+            RpcCache.set(currentAddress, {
+              method,
+              params,
+              result,
+              chainId: chainServerId,
+            });
+            return result;
+          });
+        RpcCache.set(currentAddress, {
+          method,
+          params,
+          result: promise,
+          chainId: chainServerId,
+        });
+        return promise;
+      } else {
+        const promise = customRPCServiceApi
+          .defaultEthRPC({
+            chainServerId,
+            origin,
+            method,
+            params,
+          })
+          .then(result => {
+            RpcCache.set(currentAddress, {
+              method,
+              params,
+              result,
+              chainId: chainServerId,
+            });
+            return result;
+          });
+        RpcCache.set(currentAddress, {
+          method,
+          params,
+          result: promise,
+          chainId: chainServerId,
+        });
+        return promise;
+      }
+    } else {
+      const client = await customTestnetServiceApi.getClient(chain.id);
+      return client.request({ method: method as any, params: params as any });
+    }
+  };
+
+  ethRequestAccounts = async (req: { session: Session; account?: Account }) => {
+    const {
+      session: { origin },
+    } = req;
+    console.log(req);
+    assertProviderRequest(req as any);
+    if (!getDappSnapshot(origin)?.isConnected) {
+      throw ethErrors.provider.unauthorized();
+    }
+
+    const _account = req.account;
+    const account = _account ? [_account.address.toLowerCase()] : [];
+
+    broadcastSessionEventSync(BroadcastEvent.accountsChanged, account, origin);
+    const connectSite = getConnectedDappSnapshot(origin);
+
+    if (connectSite) {
+      const chain = findChain({
+        enum: connectSite.chainId,
+      });
+      if (chain) {
+        // // rabby:chainChanged event must be sent before chainChanged event
+        // broadcastSessionEventSync('rabby:chainChanged', chain, origin);
+        broadcastSessionEventSync(
+          BroadcastEvent.chainChanged,
+          {
+            chainId: chain.hex,
+            networkVersion: chain.network,
+          },
+          origin,
+        );
+      }
+    }
+
+    return account;
+  };
+
+  @Reflect.metadata('SAFE', true)
+  ethAccounts = async ({
+    session: { origin },
+    account,
+  }: {
+    session: Session;
+    account?: Account | null;
+  }) => {
+    if (!getDappSnapshot(origin)?.isConnected) {
+      return [];
+    }
+
+    return account ? [account.address.toLowerCase()] : [];
+  };
+
+  ethCoinbase = async ({
+    session: { origin },
+    account,
+  }: {
+    session: Session;
+    account?: Account;
+  }) => {
+    if (!getDappSnapshot(origin)?.isConnected) {
+      return null;
+    }
+
+    return account ? account.address.toLowerCase() : null;
+  };
+
+  @Reflect.metadata('SAFE', true)
+  ethChainId = (req: ProviderRequest) => {
+    const requestChain = getProviderRequestChain(req);
+    if (requestChain) {
+      return requestChain.hex;
+    }
+
+    const { session } = req;
+    const origin = session.origin;
+    const site = getDappSnapshot(origin);
+
+    return findChainByEnum(site?.chainId, { fallback: CHAINS_ENUM.ETH })!.hex;
+  };
+
+  @Reflect.metadata('APPROVAL', [
+    'SignTx',
+    (req: ProviderRequest) => {
+      assertProviderRequest(req);
+      const {
+        data: {
+          params: [tx],
+        },
+        session,
+        account,
+      } = req;
+      const currentAddress = account?.address?.toLowerCase();
+      const requestChain = getProviderRequestChain(req);
+      const currentChain = requestChain
+        ? requestChain.enum
+        : isInternalDappSnapshot(session.origin)
+        ? findChain({ id: tx.chainId })!.enum
+        : getConnectedDappSnapshot(session.origin)?.chainId;
+      if (tx.from.toLowerCase() !== currentAddress) {
+        throw ethErrors.rpc.invalidParams(
+          'from should be same as current address',
+        );
+      }
+      if (
+        'chainId' in tx &&
+        (!currentChain ||
+          Number(tx.chainId) !== findChain({ enum: currentChain })?.id)
+      ) {
+        throw ethErrors.rpc.invalidParams(
+          'chainId should be same as current chainId',
+        );
+      }
+    },
+  ])
+  ethSendTransaction = async (options: {
+    data: {
+      $ctx?: any;
+      params: any;
+    };
+    session: Session;
+    approvalRes: ApprovalRes;
+    pushed: boolean;
+    result: any;
+    account: Account;
+  }) => {
+    assertProviderRequest(options as any);
+    if (options.pushed) {
+      return options.result;
+    }
+    const {
+      data: {
+        params: [txParams],
+      },
+      session: { origin },
+      approvalRes,
+      account,
+    } = cloneDeep(options);
+    const currentAccount = account;
+    const keyring = await this._checkAddress(txParams.from, options);
+    const isSend = !!txParams.isSend;
+    const isSpeedUp = !!txParams.isSpeedUp;
+    const isCancel = !!txParams.isCancel;
+    const extra = approvalRes.extra;
+    const signingTxId = approvalRes.signingTxId;
+    const isCoboSafe = !!txParams.isCoboSafe;
+    const pushType = approvalRes.pushType || 'default';
+    const lowGasDeadline = approvalRes.lowGasDeadline;
+    const preReqId = approvalRes.reqId;
+    const isGasLess = approvalRes.isGasLess || false;
+    const sig = approvalRes.sig;
+    const logId = approvalRes?.logId || '';
+    const isGasAccount = approvalRes.isGasAccount || false;
+    const approvalTxType = approvalRes.type;
+
+    const eip7702Revoke = options?.data?.$ctx?.eip7702Revoke || false;
+    const eip7702RevokeAuthorization =
+      options?.data?.$ctx?.eip7702RevokeAuthorization || [];
+
+    let signedTransactionSuccess = false;
+    delete txParams.isSend;
+    delete approvalRes.isSend;
+    delete approvalRes.isSwap;
+    delete approvalRes.address;
+    delete approvalRes.type;
+    delete approvalRes.uiRequestComponent;
+    delete approvalRes.traceId;
+    delete approvalRes.extra;
+    delete approvalRes.$ctx;
+    delete approvalRes.signingTxId;
+    delete approvalRes.pushType;
+    delete approvalRes.lowGasDeadline;
+    delete approvalRes.reqId;
+    delete txParams.isCoboSafe;
+    delete approvalRes.isGasLess;
+    delete approvalRes.isGasAccount;
+    delete approvalRes.logId;
+    delete approvalRes.sig;
+    delete approvalRes.$account;
+
+    let is1559 = is1559Tx(approvalRes);
+    const is7702 = is7702Tx(approvalRes);
+    const chainForTx = findChain({
+      id: approvalRes.chainId,
+    });
+    const isTempoTx = shouldUseTempoTransaction({
+      tx: {
+        ...txParams,
+        ...approvalRes,
+        type: (txParams as any).type ?? approvalTxType,
+      },
+      chainServerId: chainForTx?.serverId,
+      isGasAccount,
+      accountType: currentAccount.type,
+    });
+
+    if ((eip7702Revoke || is7702) && origin !== INTERNAL_REQUEST_ORIGIN) {
+      throw new Error('not support 7702');
+    }
+
+    if (is7702 && !(eip7702Revoke || isSpeedUp)) {
+      throw new Error('not support 7702');
+    }
+
+    if (
+      is1559 &&
+      approvalRes.maxFeePerGas === approvalRes.maxPriorityFeePerGas &&
+      !eip7702Revoke &&
+      !is7702 &&
+      !isTempoTx
+    ) {
+      // fallback to legacy transaction if maxFeePerGas is equal to maxPriorityFeePerGas
+      approvalRes.gasPrice = approvalRes.maxFeePerGas;
+      delete approvalRes.maxFeePerGas;
+      delete approvalRes.maxPriorityFeePerGas;
+      is1559 = false;
+    }
+    const common = Common.custom(
+      { chainId: approvalRes.chainId },
+      { hardfork: Hardfork.Prague, eips: [7702] },
+    );
+    const txData = { ...approvalRes, gasLimit: approvalRes.gas };
+    if (is1559 && !isTempoTx) {
+      txData.type = '0x2';
+    }
+    if (isTempoTx) {
+      txData.type = '0x76';
+    }
+    if (
+      (is7702 && isSpeedUp) ||
+      (eip7702Revoke && eip7702RevokeAuthorization?.length)
+    ) {
+      txData.type = '0x4';
+
+      if (!isSpeedUp) {
+        const authorizationList = [] as AuthorizationListItem[];
+
+        for (const authorization of eip7702RevokeAuthorization) {
+          const signature: string =
+            await keyringServiceApi.signEip7702Authorization(keyring, {
+              from: txParams.from,
+              authorization: authorization,
+            });
+          const r = signature.slice(0, 66) as `0x${string}`;
+          const s = add0x(signature.slice(66, 130));
+          const v = parseInt(signature.slice(130, 132), 16);
+          const yParity = toHex(v - 27 === 0 ? 0 : 1);
+          authorizationList.push({
+            chainId: toHex(authorization[0]),
+            address: authorization[1],
+            nonce: toHex(authorization[2]),
+            r: removeLeadingZeroes(r),
+            s: removeLeadingZeroes(s),
+            yParity: removeLeadingZeroes(yParity),
+          } as any);
+        }
+        txData.authorizationList = authorizationList;
+        approvalRes.authorizationList = authorizationList;
+      }
+
+      // bsc use gasPrice
+      if (!txData.maxFeePerGas || !txData.maxPriorityFeePerGas) {
+        txData.maxFeePerGas = txData.maxFeePerGas || txData.gasPrice;
+        txData.maxPriorityFeePerGas =
+          txData.maxPriorityFeePerGas || txData.gasPrice;
+        delete txData.gasPrice;
+      }
+
+      if (!approvalRes.maxFeePerGas || !approvalRes.maxPriorityFeePerGas) {
+        approvalRes.maxFeePerGas =
+          approvalRes.maxFeePerGas || approvalRes.gasPrice;
+        approvalRes.maxPriorityFeePerGas =
+          approvalRes.maxPriorityFeePerGas || approvalRes.gasPrice;
+        delete approvalRes.gasPrice;
+      }
+    }
+    const tx = isTempoTx
+      ? null
+      : TransactionFactory.fromTxData(txData as FeeMarketEIP1559TxData, {
+          common,
+        });
+    let opts;
+    opts = extra;
+    if (currentAccount.type === KEYRING_TYPE.GnosisKeyring) {
+      const buildinProvider = getGlobalProvider();
+      if (!buildinProvider?.currentProvider) {
+        throw new Error('buildinProvider not found');
+      }
+      buildinProvider.currentProvider.currentAccount =
+        approvalRes!.account!.address;
+      buildinProvider.currentProvider.currentAccountType =
+        approvalRes!.account!.type;
+      buildinProvider.currentProvider.currentAccountBrand =
+        approvalRes!.account!.brandName;
+      try {
+        const provider = new ethers.providers.Web3Provider(
+          buildinProvider.currentProvider,
+        );
+        opts = {
+          provider,
+        };
+      } catch (e) {
+        console.log(e);
+      }
+    }
+    const requestChain = getProviderRequestChain(options as any);
+    const chain = requestChain
+      ? requestChain.enum
+      : isInternalDappSnapshot(origin)
+      ? findChain({ id: approvalRes.chainId })!.enum
+      : getConnectedDappSnapshot(origin)!.chainId;
+
+    const approvingTx = await transactionHistoryServiceApi.getSigningTx(
+      signingTxId!,
+    );
+    if (!approvingTx?.rawTx || !approvingTx?.explain) {
+      throw new Error(`approvingTx not found: ${signingTxId}`);
+    }
+    await transactionHistoryServiceApi.updateSigningTx(signingTxId!, {
+      isSubmitted: true,
+    });
+
+    const { explain: cacheExplain, rawTx, action } = approvingTx;
+
+    const chainItem = findChainByEnum(chain);
+
+    const statsData: StatsData = {
+      signed: false,
+      signedSuccess: false,
+      submit: false,
+      submitSuccess: false,
+      type: currentAccount.brandName,
+      chainId: chainItem?.serverId || '',
+      category: KEYRING_CATEGORY_MAP[currentAccount.type],
+      preExecSuccess: cacheExplain
+        ? cacheExplain.pre_exec?.success && cacheExplain.calcSuccess
+        : true,
+      createdBy: options?.data?.$ctx?.ga ? 'rabby' : 'dapp',
+      source: options?.data?.$ctx?.ga?.source || '',
+      trigger: options?.data?.$ctx?.ga?.trigger || '',
+      reported: false,
+    };
+
+    let signedTx;
+    let tempoSerializedRawTx: `0x${string}` | undefined;
+    const tempoCalls = isTempoTx
+      ? normalizeTempoCalls({
+          approvalRes,
+          txParams: txParams as Record<string, any>,
+        })
+      : undefined;
+    const shouldUseKeyringTempoSign =
+      isTempoTx && isSimpleOrHdKeyringType(currentAccount.type);
+    try {
+      if (isTempoTx) {
+        const typedApprovalRes = approvalRes as any;
+        const shouldBackendSponsorTempo = isGasAccount || isGasLess;
+        const normalizedFeePayerSignature = normalizeTempoSecp256k1Signature(
+          typedApprovalRes.feePayerSignature,
+        );
+        const normalizedTxValue = normalizeHexValue(approvalRes.value);
+        const normalizedTempoGas = approvalRes.gas || approvalRes.gasLimit;
+        const has1559FeeFields =
+          typeof approvalRes.maxFeePerGas !== 'undefined' ||
+          typeof approvalRes.maxPriorityFeePerGas !== 'undefined';
+        const tempoTxData: any = omitUndefined({
+          chainId: Number(approvalRes.chainId),
+          type: '0x76',
+          from: txParams.from,
+          to: approvalRes.to ?? (txParams as any).to,
+          data:
+            typeof approvalRes.data !== 'undefined'
+              ? approvalRes.data
+              : (txParams as any).data,
+          value: normalizedTxValue,
+          calls: tempoCalls,
+          gas: normalizedTempoGas,
+          gasPrice: has1559FeeFields ? undefined : approvalRes.gasPrice,
+          maxFeePerGas: approvalRes.maxFeePerGas,
+          maxPriorityFeePerGas: approvalRes.maxPriorityFeePerGas,
+          nonce: approvalRes.nonce,
+          nonceKey: typedApprovalRes.nonceKey,
+          keyAuthorization: typedApprovalRes.keyAuthorization,
+          validBefore: typedApprovalRes.validBefore,
+          validAfter: typedApprovalRes.validAfter,
+          authorizationList: typedApprovalRes.authorizationList,
+          feePayerSignature: optionalValue(normalizedFeePayerSignature),
+          feePayer:
+            shouldBackendSponsorTempo ||
+            (typedApprovalRes.feePayer === true &&
+              typeof typedApprovalRes.feePayerSignature === 'undefined')
+              ? true
+              : undefined,
+          feeToken: shouldBackendSponsorTempo
+            ? undefined
+            : typedApprovalRes.feeToken,
+        });
+
+        if (!shouldUseKeyringTempoSign) {
+          throw new Error(
+            'tempo transaction is only supported for private key and mnemonic keyrings',
+          );
+        }
+        signedTx = await keyringServiceApi.signTransaction(
+          keyring,
+          tempoTxData,
+          txParams.from,
+          opts,
+        );
+        tempoSerializedRawTx = (signedTx as any).serializedTransaction;
+        if (!tempoSerializedRawTx) {
+          throw new Error('tempo transaction serialize failed');
+        }
+      } else {
+        signedTx = await keyringServiceApi.signTransaction(
+          keyring,
+          tx,
+          txParams.from,
+          opts,
+        );
+      }
+    } catch (e: any) {
+      const errObj =
+        typeof e === 'object'
+          ? { message: e.message }
+          : ({ message: e } as any);
+      errObj.method = EVENTS.COMMON_HARDWARE.REJECTED;
+
+      throw errObj;
+    }
+
+    const serializedSignedTx =
+      typeof signedTx === 'object' && typeof signedTx.serialize === 'function'
+        ? bytesToHex(signedTx.serialize())
+        : undefined;
+
+    const txDataWithRSV: any = {
+      ...txData,
+      ...(isTempoTx
+        ? {}
+        : {
+            r: addHexPrefix(signedTx.r),
+            s: addHexPrefix(signedTx.s),
+            v: addHexPrefix(signedTx.v),
+          }),
+    };
+
+    try {
+      if (
+        currentAccount.type === KEYRING_TYPE.GnosisKeyring
+        // ||
+        // currentAccount.type === KEYRING_TYPE.CoboArgusKeyring
+      ) {
+        signedTransactionSuccess = true;
+        statsData.signed = true;
+        statsData.signedSuccess = true;
+        return;
+      }
+
+      const onTransactionCreated = async (info: {
+        hash?: string;
+        reqId?: string;
+        pushType?: TxPushType;
+      }) => {
+        const { hash, reqId, pushType = 'default' } = info;
+        if (
+          options?.data?.$ctx?.stats?.afterSign?.length &&
+          Array.isArray(options?.data?.$ctx?.stats?.afterSign)
+        ) {
+          options.data.$ctx.stats.afterSign.forEach(({ name, params }) => {
+            if (name && params) {
+              stats.report(name, params);
+            }
+          });
+        }
+
+        const { r, s, v, ...other } = approvalRes;
+        if (hash) {
+          void swapServiceApi.postSwap(chain, hash, other).catch(error => {
+            console.error('[swapService] postSwap failed', error);
+          });
+          void bridgeServiceApi.postBridge(chain, hash, other).catch(error => {
+            console.error('[bridgeService] postBridge failed', error);
+          });
+        }
+
+        statsData.submit = true;
+        statsData.submitSuccess = true;
+        // if (isSend) {
+        //   pageStateCacheService.clear();
+        // }
+        const _rawTx = {
+          ...rawTx,
+          ...approvalRes,
+          r: covertToHex(signedTx.r),
+          s: covertToHex(signedTx.s),
+          v: covertToHex(signedTx.v),
+        };
+        if (is1559) {
+          delete _rawTx.gasPrice;
+        } else {
+          delete _rawTx.maxPriorityFeePerGas;
+          delete _rawTx.maxFeePerGas;
+        }
+        updateExpiredTime(txParams.from, PENDGING_TIME);
+
+        // TODO: transactionHistory
+        try {
+          await transactionHistoryServiceApi.addTx({
+            address: txParams.from,
+            nonce: +approvalRes.nonce,
+            chainId: approvalRes.chainId,
+
+            rawTx: _rawTx,
+            createdAt: Date.now(),
+            hash,
+            reqId,
+            pushType,
+            explain: cacheExplain,
+            action: action,
+            site: isInternalDappSnapshot(origin)
+              ? createDappBySession(INTERNAL_REQUEST_SESSION)
+              : getDappSnapshot(origin),
+            isPending: true,
+            $ctx: options?.data?.$ctx,
+            keyringType: currentAccount.type,
+          });
+          await transactionHistoryServiceApi.removeSigningTx(signingTxId!);
+        } catch (error) {
+          console.error(
+            '[transactionHistory] persist submitted tx failed',
+            error,
+          );
+        }
+        if (hash) {
+          void transactionWatcherServiceApi
+            .addTx(`${txParams.from}_${approvalRes.nonce}_${chain}`, {
+              nonce: approvalRes.nonce,
+              hash,
+              chain,
+            })
+            .catch(error => {
+              console.error('[transactionWatcher] addTx failed', error);
+            });
+        }
+        if (reqId && !hash) {
+          void transactionBroadcastWatcherServiceApi
+            .addTx(reqId, {
+              reqId,
+              address: txParams.from,
+              chainId: findChain({ enum: chain })!.id,
+              nonce: approvalRes.nonce,
+            })
+            .catch(error => {
+              console.error(
+                '[transactionBroadcastWatcher] addTx failed',
+                error,
+              );
+            });
+        }
+
+        // if (isCoboSafe) {
+        //   preferenceService.resetCurrentCoboSafeAddress();
+        // }
+      };
+      const onTransactionSubmitFailed = (e: any) => {
+        if (
+          options?.data?.$ctx?.stats?.afterSign?.length &&
+          Array.isArray(options?.data?.$ctx?.stats?.afterSign)
+        ) {
+          options.data.$ctx.stats.afterSign.forEach(({ name, params }) => {
+            if (name && params) {
+              stats.report(name, params);
+            }
+          });
+        }
+
+        stats.report('submitTransaction', {
+          type: currentAccount.brandName,
+          chainId: chainItem?.serverId || '',
+          category: KEYRING_CATEGORY_MAP[currentAccount.type],
+          success: false,
+          preExecSuccess: cacheExplain
+            ? cacheExplain.pre_exec?.success && cacheExplain.calcSuccess
+            : true,
+          createdBy: options?.data?.$ctx?.ga ? 'rabby' : 'dapp',
+          source: options?.data?.$ctx?.ga?.source || '',
+          trigger: options?.data?.$ctx?.ga?.trigger || '',
+        });
+        if (!isSpeedUp && !isCancel) {
+          // transactionHistoryService.addSubmitFailedTransaction(
+          //   {
+          //     rawTx: approvalRes,
+          //     createdAt: Date.now(),
+          //     isCompleted: true,
+          //     hash: '',
+          //     failed: false,
+          //     isSubmitFailed: true,
+          //   },
+          //   cacheExplain,
+          //   origin,
+          // );
+        }
+        const errMsg = e.details || e.message || JSON.stringify(e);
+        setStatsDataWithExistingSignMethod(statsData);
+        throw new Error(errMsg);
+      };
+
+      if (typeof signedTx === 'string') {
+        await onTransactionCreated({
+          hash: signedTx,
+          pushType: 'default',
+        });
+        if (
+          currentAccount.type === KEYRING_TYPE.WalletConnectKeyring
+          // || currentAccount.type === KEYRING_TYPE.CoinbaseKeyring
+        ) {
+          statsData.signed = true;
+          statsData.signedSuccess = true;
+        }
+        setStatsDataWithExistingSignMethod(statsData);
+        return signedTx;
+      }
+
+      // const buildTx = TransactionFactory.fromTxData({
+      //   ...approvalRes,
+      //   r: addHexPrefix(signedTx.r),
+      //   s: addHexPrefix(signedTx.s),
+      //   v: addHexPrefix(signedTx.v),
+      //   type: is1559 ? '0x2' : '0x0',
+      // });
+
+      // Report address type(not sensitive information) to sentry when tx signature is invalid
+      // TODO: FIXME
+      // if (!buildTx.verifySignature()) {
+      //   if (!buildTx.v) {
+      //     Sentry.captureException(new Error(`v missed, ${keyring.type}`));
+      //   } else if (!buildTx.s) {
+      //     Sentry.captureException(new Error(`s missed, ${keyring.type}`));
+      //   } else if (!buildTx.r) {
+      //     Sentry.captureException(new Error(`r missed, ${keyring.type}`));
+      //   } else {
+      //     Sentry.captureException(
+      //       new Error(`invalid signature, ${keyring.type}`),
+      //     );
+      //   }
+      // }
+      signedTransactionSuccess = true;
+      statsData.signed = true;
+      statsData.signedSuccess = true;
+      eventBus.emit(EVENTS.TX_SUBMITTING, {});
+      try {
+        validateGasPriceRange(approvalRes);
+        let hash: string | undefined = undefined;
+        let reqId: string | undefined = undefined;
+        if (
+          !findChain({ enum: chain })?.isTestnet ||
+          isGasAccount ||
+          isGasLess
+        ) {
+          if (
+            (await customRPCServiceApi.hasCustomRPC(chain)) &&
+            !isGasAccount &&
+            !isGasLess
+          ) {
+            const rawTx = isTempoTx
+              ? tempoSerializedRawTx
+              : serializedSignedTx ||
+                bytesToHex(
+                  TransactionFactory.fromTxData(txDataWithRSV, {
+                    common,
+                  }).serialize(),
+                );
+            if (!rawTx) {
+              throw new Error('tempo transaction serialize failed');
+            }
+            hash = await customRPCServiceApi.requestCustomRPC(
+              chain,
+              'eth_sendRawTransaction',
+              [rawTx],
+            );
+            await onTransactionCreated({ hash, reqId, pushType });
+          } else {
+            const chainServerId = findChain({ enum: chain })!.serverId;
+            const tempoSubmitTx = isTempoTx
+              ? (omitUndefined({
+                  ...((buildTempoSubmitTxFromSerialized({
+                    serializedTx: tempoSerializedRawTx,
+                    approvalRes,
+                    fallbackCalls: tempoCalls,
+                    shouldIgnoreFeeToken: isGasAccount,
+                  }) ||
+                    buildTempoSubmitTxFallback({
+                      approvalRes,
+                      fallbackCalls: tempoCalls,
+                      shouldIgnoreFeeToken: isGasAccount,
+                    })) as any),
+                  r: covertToHex(signedTx.r),
+                  s: covertToHex(signedTx.s),
+                  v: covertToHex(signedTx.v),
+                }) as any)
+              : undefined;
+            const params: Parameters<typeof openapi.submitTxV2>[0] = {
+              context: {
+                tx: (tempoSubmitTx || {
+                  ...approvalRes,
+                  r: covertToHex(signedTx.r),
+                  s: covertToHex(signedTx.s),
+                  v: covertToHex(signedTx.v),
+                  value: approvalRes.value || '0x0',
+                }) as Tx,
+                origin,
+                log_id: logId,
+              },
+              backend_push_require: {
+                gas_type: isGasAccount
+                  ? 'gas_account'
+                  : isGasLess
+                  ? 'gasless'
+                  : null,
+              },
+              sig,
+              mev_share_model: pushType === 'mev' ? 'user' : 'rabby',
+            };
+
+            const adoptBE7702Params = () => {
+              if (
+                approvalRes.authorizationList &&
+                approvalRes.authorizationList?.some(e => e.yParity)
+              ) {
+                params.context.tx = {
+                  ...params.context.tx,
+                  authorizationList: approvalRes.authorizationList.map(e => ({
+                    chainId: hexToNumber(e.chainId),
+                    address: e.address,
+                    nonce: e.nonce,
+                    r: e.r,
+                    s: e.s,
+                    v: e.yParity,
+                  })),
+                } as any;
+              }
+            };
+
+            const defaultRPC = await customRPCServiceApi.getDefaultRPC(
+              chainServerId,
+            );
+
+            if (defaultRPC?.txPushToRPC && !isGasLess && !isGasAccount) {
+              let fePushedFailed = false;
+
+              const rawTx = isTempoTx
+                ? tempoSerializedRawTx
+                : serializedSignedTx ||
+                  bytesToHex(
+                    TransactionFactory.fromTxData(txDataWithRSV, {
+                      common,
+                    }).serialize(),
+                  );
+              if (!rawTx) {
+                throw new Error('tempo transaction serialize failed');
+              }
+
+              try {
+                const [fePushedHash, url] =
+                  await customRPCServiceApi.defaultRPCSubmitTxWithFallback(
+                    chainServerId,
+                    'eth_sendRawTransaction',
+                    [rawTx],
+                  );
+
+                hash = fePushedHash;
+
+                console.log('push tx id', fePushedHash);
+
+                params.frontend_push_result = {
+                  success: true,
+                  has_pushed: true,
+                  raw_tx: rawTx,
+                  url,
+                  return_tx_id: fePushedHash!,
+                };
+
+                openapi.submitTxV2(params).catch(error => {
+                  console.log('ignore BE error', error);
+                });
+              } catch (fePushError) {
+                fePushedFailed = true;
+                const urls =
+                  await customRPCServiceApi.getDefaultRPCByChainServerId(
+                    chainServerId,
+                  );
+                params.frontend_push_result = {
+                  success: false,
+                  has_pushed: true,
+                  url: urls?.rpcUrl?.[0] || '',
+                  error_msg:
+                    typeof fePushError === 'object'
+                      ? (fePushError as any)?.message
+                      : String(fePushError),
+                };
+              }
+              if (fePushedFailed) {
+                adoptBE7702Params();
+                const res = await openapi.submitTxV2(params);
+                hash = res?.tx_id;
+              }
+            } else {
+              adoptBE7702Params();
+              const res = await openapi.submitTxV2(params);
+              if (res.access_token) {
+                handleGasAccountLoginSuccess(
+                  res.access_token,
+                  currentAccount,
+                ).catch(error => {
+                  console.error('[handleGasAccountLoginSuccess] failed', error);
+                });
+
+                eventBus.emit(EVENTS.AUTO_LOGIN_GAS_ACCOUNT, null);
+              }
+              hash = res?.tx_id;
+            }
+
+            //No more low gas push, reqId is no longer required.
+            reqId = undefined;
+
+            if (!hash) {
+              onTransactionSubmitFailed(new Error('Submit tx failed'));
+            } else {
+              await onTransactionCreated({ hash, reqId, pushType });
+              setStatsDataWithExistingSignMethod(statsData);
+            }
+          }
+        } else {
+          const chainData = findChain({
+            enum: chain,
+          })!;
+          const rawTx = isTempoTx
+            ? tempoSerializedRawTx
+            : serializedSignedTx ||
+              bytesToHex(
+                TransactionFactory.fromTxData(txDataWithRSV, {
+                  common,
+                }).serialize(),
+              );
+          if (!rawTx) {
+            throw new Error('tempo transaction serialize failed');
+          }
+          const client = await customTestnetServiceApi.getClient(chainData.id);
+
+          hash = await client?.request({
+            method: 'eth_sendRawTransaction',
+            params: [rawTx as any],
+          });
+          await onTransactionCreated({ hash, reqId, pushType });
+          setNotificationStatsDataSync(statsData);
+        }
+
+        return hash;
+      } catch (e: any) {
+        console.log('submit tx failed', e);
+        onTransactionSubmitFailed(e);
+      }
+    } catch (e) {
+      if (!signedTransactionSuccess) {
+        statsData.signed = true;
+        statsData.signedSuccess = false;
+      }
+      setStatsDataWithExistingSignMethod(statsData);
+      if ('details' in (e as any)) {
+        throw new Error((e as any).details);
+      } else {
+        throw typeof e === 'object' ? e : new Error(JSON.stringify(e));
+      }
+    }
+  };
+  @Reflect.metadata('SAFE', true)
+  netVersion = (req: ProviderRequest) => {
+    return this.ethRpc({
+      ...req,
+      data: { ...req.data, method: 'net_version', params: [] },
+    });
+  };
+
+  @Reflect.metadata('SAFE', true)
+  web3ClientVersion = () => {
+    return `Rabby/${process.env.release}`;
+  };
+
+  @Reflect.metadata('APPROVAL', ['ETHSign', () => null, { height: 390 }])
+  ethSign = () => {
+    throw new Error(
+      "Signing with 'eth_sign' can lead to asset loss. For your safety, Rabby does not support this method.",
+    );
+  };
+
+  @Reflect.metadata('APPROVAL', [
+    'SignText',
+    req => {
+      assertProviderRequest(req);
+      const {
+        data: {
+          params: [_, from],
+        },
+        account,
+      } = req;
+      const currentAddress = account.address.toLowerCase();
+      if (from.toLowerCase() !== currentAddress)
+        throw ethErrors.rpc.invalidParams(
+          'from should be same as current address',
+        );
+    },
+  ])
+  personalSign = async (req: {
+    data: {
+      params: SignTypeDataParams;
+    };
+    session: Session;
+    account: Account;
+    approvalRes: Pick<ApprovalRes, 'extra'>;
+  }) => {
+    assertProviderRequest(req as any);
+    const { data, approvalRes, account: currentAccount } = req;
+    if (!data.params) return;
+    if (
+      currentAccount.type === KEYRING_TYPE.GnosisKeyring &&
+      isString(approvalRes)
+    ) {
+      return approvalRes;
+    }
+    try {
+      const [string, from] = data.params;
+      const hex = isHexString(string) ? string : stringToHex(string);
+      const keyring = await this._checkAddress(from, req);
+      const result = await keyringServiceApi.signPersonalMessage(
+        keyring,
+        { data: hex, from },
+        approvalRes?.extra,
+      );
+      // TODO
+      // signTextHistoryService.createHistory({
+      //   address: from,
+      //   text: string,
+      //   origin: session.origin,
+      //   type: 'personalSign',
+      // });
+      reportSignText({
+        account: currentAccount,
+        method: 'personalSign',
+        success: true,
+      });
+      return result;
+    } catch (e) {
+      reportSignText({
+        account: currentAccount,
+        method: 'personalSign',
+        success: false,
+      });
+      throw e;
+    }
+  };
+
+  @Reflect.metadata('PRIVATE', true)
+  private _signTypedData = async (
+    {
+      from,
+      data,
+      version,
+      extra,
+    }: {
+      from: string;
+      data: any;
+      version: string;
+      extra: any;
+    },
+    req: ProviderRequest,
+  ) => {
+    const keyring = await this._checkAddress(from, req);
+    let _data = data;
+    if (version !== 'V1') {
+      if (typeof data === 'string') {
+        _data = JSON.parse(data);
+      }
+    }
+
+    return keyringServiceApi.signTypedMessage(
+      keyring,
+      {
+        from,
+        data: _data,
+      },
+      { version, ...(extra || {}) },
+    );
+  };
+
+  @Reflect.metadata('APPROVAL', ['SignTypedData', v1SignTypedDataVlidation])
+  ethSignTypedData = async req => {
+    const {
+      data: {
+        params: [data, from],
+      },
+      session,
+      approvalRes,
+    } = req;
+    assertProviderRequest(req);
+    const currentAccount = req.account;
+    if (
+      currentAccount.type === KEYRING_TYPE.GnosisKeyring &&
+      isString(approvalRes)
+    ) {
+      return approvalRes;
+    }
+    try {
+      const result = await this._signTypedData(
+        {
+          from,
+          data,
+          version: 'V1',
+          extra: approvalRes?.extra,
+        },
+        req,
+      );
+      // TODO
+      // signTextHistoryService.createHistory({
+      //   address: from,
+      //   text: data,
+      //   origin: session.origin,
+      //   type: 'ethSignTypedData',
+      // });
+      reportSignText({
+        account: currentAccount,
+        method: 'ethSignTypedData',
+        success: true,
+      });
+      return result;
+    } catch (e) {
+      reportSignText({
+        account: currentAccount,
+        method: 'ethSignTypedData',
+        success: false,
+      });
+      throw e;
+    }
+  };
+
+  @Reflect.metadata('APPROVAL', ['SignTypedData', v1SignTypedDataVlidation])
+  ethSignTypedDataV1 = async req => {
+    assertProviderRequest(req);
+    const {
+      data: {
+        params: [data, from],
+      },
+      approvalRes,
+      account,
+    } = req;
+    const currentAccount = account;
+    if (
+      currentAccount.type === KEYRING_TYPE.GnosisKeyring &&
+      isString(approvalRes)
+    ) {
+      return approvalRes;
+    }
+    try {
+      const result = await this._signTypedData(
+        {
+          from,
+          data,
+          version: 'V1',
+          extra: approvalRes?.extra,
+        },
+        req,
+      );
+      // signTextHistoryService.createHistory({
+      //   address: from,
+      //   text: data,
+      //   origin: session.origin,
+      //   type: 'ethSignTypedDataV1',
+      // });
+      reportSignText({
+        account: currentAccount,
+        method: 'ethSignTypedDataV1',
+        success: true,
+      });
+      return result;
+    } catch (e) {
+      reportSignText({
+        account: currentAccount,
+        method: 'ethSignTypedDataV1',
+        success: false,
+      });
+      throw e;
+    }
+  };
+
+  @Reflect.metadata('APPROVAL', ['SignTypedData', signTypedDataVlidation])
+  ethSignTypedDataV3 = async req => {
+    assertProviderRequest(req);
+    const {
+      data: {
+        params: [from, data],
+      },
+      session,
+      approvalRes,
+      account: currentAccount,
+    } = req;
+    if (
+      currentAccount.type === KEYRING_TYPE.GnosisKeyring &&
+      isString(approvalRes)
+    ) {
+      return approvalRes;
+    }
+    try {
+      const result = await this._signTypedData(
+        {
+          from,
+          data,
+          version: 'V3',
+          extra: approvalRes?.extra,
+        },
+        req,
+      );
+      // signTextHistoryService.createHistory({
+      //   address: from,
+      //   text: data,
+      //   origin: session.origin,
+      //   type: 'ethSignTypedDataV3',
+      // });
+      reportSignText({
+        account: currentAccount,
+        method: 'ethSignTypedDataV3',
+        success: true,
+      });
+      return result;
+    } catch (e) {
+      reportSignText({
+        account: currentAccount,
+        method: 'ethSignTypedDataV3',
+        success: false,
+      });
+      throw e;
+    }
+  };
+
+  @Reflect.metadata('APPROVAL', ['SignTypedData', signTypedDataVlidation])
+  ethSignTypedDataV4 = async req => {
+    const {
+      data: {
+        params: [from, data],
+      },
+      session,
+      approvalRes,
+      account: currentAccount,
+    } = req;
+    assertProviderRequest(req);
+    if (
+      currentAccount.type === KEYRING_TYPE.GnosisKeyring &&
+      isString(approvalRes)
+    ) {
+      return approvalRes;
+    }
+    try {
+      const result = await this._signTypedData(
+        {
+          from,
+          data,
+          version: 'V4',
+          extra: approvalRes?.extra,
+        },
+        req,
+      );
+      // signTextHistoryService.createHistory({
+      //   address: from,
+      //   text: data,
+      //   origin: session.origin,
+      //   type: 'ethSignTypedDataV4',
+      // });
+      reportSignText({
+        account: currentAccount,
+        method: 'ethSignTypedDataV4',
+        success: true,
+      });
+      return result;
+    } catch (e) {
+      reportSignText({
+        account: currentAccount,
+        method: 'ethSignTypedDataV4',
+        success: false,
+      });
+      throw e;
+    }
+  };
+
+  @Reflect.metadata('APPROVAL', [
+    'AddChain',
+    ({
+      data: {
+        params: [chainParams],
+      },
+      session,
+    }) => {
+      if (!chainParams) {
+        throw ethErrors.rpc.invalidParams('params is required but got []');
+      }
+      if (!chainParams.chainId) {
+        throw ethErrors.rpc.invalidParams('chainId is required');
+      }
+      const connected = getConnectedDappSnapshot(session.origin);
+
+      if (connected) {
+        // if rabby supported this chain, do not show popup
+        if (findChain({ id: chainParams.chainId })) {
+          return true;
+        }
+      }
+    },
+    // { height: 650 },
+  ])
+  walletAddEthereumChain = ({
+    data: {
+      params: [chainParams],
+    },
+    session: { origin },
+    approvalRes,
+  }: {
+    data: {
+      params: AddEthereumChainParams[];
+    };
+    session: {
+      origin: string;
+    };
+    approvalRes?: {
+      chain: CHAINS_ENUM;
+      rpcUrl: string;
+    };
+  }) => {
+    let chainId = chainParams.chainId;
+    if (typeof chainId === 'number') {
+      chainId = intToHex(chainId).toLowerCase();
+    } else {
+      chainId = `0x${new BigNumber(chainId).toString(16).toLowerCase()}`;
+    }
+
+    const chain = findChain({
+      hex: chainId,
+    });
+
+    if (!chain) {
+      throw new Error('This chain is not supported by Rabby yet.');
+    }
+
+    if (approvalRes) {
+      // RPCService.setRPC(approvalRes.chain, approvalRes.rpcUrl);
+    }
+
+    const connectSite = getConnectedDappSnapshot(origin);
+    const prev = connectSite
+      ? findChain({ enum: connectSite.chainId })
+      : undefined;
+    if (!connectSite) {
+      return;
+    }
+
+    updateDappSync({
+      ...connectSite,
+      chainId: chain.enum,
+    });
+
+    broadcastSessionEventSync(
+      BroadcastEvent.chainChanged,
+      {
+        chainId: chain.hex,
+        networkVersion: chain.network,
+      },
+      origin,
+    );
+    return null;
+  };
+
+  @Reflect.metadata('APPROVAL', [
+    'SwitchChain',
+    ({
+      data,
+      session,
+    }: {
+      data: {
+        params: [AddEthereumChainParams];
+      };
+      session: Session;
+    }) => {
+      if (!data.params[0]) {
+        throw ethErrors.rpc.invalidParams('params is required but got []');
+      }
+      if (!data.params[0]?.chainId) {
+        throw ethErrors.rpc.invalidParams('chainId is required');
+      }
+      const connected = getConnectedDappSnapshot(session.origin);
+      if (connected) {
+        const { chainId } = data.params[0];
+        if (
+          findChain({
+            id: +chainId,
+          })
+        ) {
+          return true;
+        }
+        throw ethErrors.provider.custom({
+          code: 4902,
+          message: `Unrecognized chain ID "${chainId}". Try adding the chain using wallet_switchEthereumChain first.`,
+        });
+      }
+    },
+    { height: 650 },
+  ])
+  walletSwitchEthereumChain = ({
+    data: {
+      params: [chainParams],
+    },
+    session: { origin },
+  }: {
+    data: {
+      params: [AddEthereumChainParams];
+    };
+    session: Session;
+  }) => {
+    let chainId = chainParams.chainId;
+    if (typeof chainId === 'number') {
+      chainId = intToHex(chainId).toLowerCase();
+    } else {
+      chainId = chainId.toLowerCase();
+    }
+    const chain = findChain({ hex: chainId });
+
+    if (!chain) {
+      throw ethErrors.provider.custom({
+        code: 4902,
+        message: `Unrecognized chain ID "${chainId}". Try adding the chain using wallet_switchEthereumChain first.`,
+      });
+    }
+
+    const connectSite = getConnectedDappSnapshot(origin);
+    const prev = connectSite
+      ? findChain({ enum: connectSite.chainId })
+      : undefined;
+
+    if (!connectSite) {
+      return;
+    }
+    updateDappSync({
+      ...connectSite,
+      chainId: chain.enum,
+    });
+
+    // rabby:chainChanged event must be sent before chainChanged event
+    // TODO: sessionService
+    // broadcastSessionEventSync(
+    //   'rabby:chainChanged',
+    //   {
+    //     ...chain,
+    //     prev,
+    //   },
+    //   origin,
+    // );
+    // broadcastSessionEventSync(
+    //   'chainChanged',
+    //   {
+    //     chain: chain.hex,
+    //     networkVersion: chain.network,
+    //   },
+    //   origin,
+    // );
+    broadcastSessionEventSync(
+      BroadcastEvent.chainChanged,
+      {
+        chainId: chain.hex,
+        networkVersion: chain.network,
+      },
+      origin,
+    );
+
+    return null;
+  };
+
+  @Reflect.metadata('APPROVAL', [
+    'AddAsset',
+    ({ data, session }) => {
+      if (!data.params) {
+        throw ethErrors.rpc.invalidParams('params is required');
+      }
+      if (!data.params.type) {
+        throw ethErrors.rpc.invalidParams('Asset type is required');
+      }
+      if (
+        !data.params.options?.address ||
+        !isAddress(data.params.options?.address, {
+          strict: false,
+        })
+      ) {
+        throw ethErrors.rpc.invalidParams(
+          `Invalid address '${data.params.options?.address}'.`,
+        );
+      }
+      return null;
+    },
+    { height: 600 },
+  ])
+  walletWatchAsset = async ({
+    approvalRes,
+  }: {
+    approvalRes: { id: string; chain: string } & CustomTestnetTokenBase;
+  }) => {
+    const { id, chain, chainId, symbol, decimals } = approvalRes;
+    const chainInfo = findChain({
+      serverId: chain,
+    });
+    if (chainInfo?.isTestnet) {
+      await customTestnetServiceApi.addToken({
+        chainId,
+        symbol,
+        decimals,
+        id,
+      });
+    }
+    // else {
+    //   preferenceService.addCustomizedToken({
+    //     address: id,
+    //     chain,
+    //   });
+    // }
+
+    return true;
+  };
+
+  walletRequestPermissions = ({
+    data: { params: permissions },
+  }: {
+    data: {
+      params: any[];
+    };
+  }) => {
+    const result: Web3WalletPermission[] = [];
+    if (permissions && 'eth_accounts' in (permissions[0] || {})) {
+      result.push({ parentCapability: 'eth_accounts' });
+    }
+    return result;
+  };
+
+  @Reflect.metadata('SAFE', true)
+  walletGetPermissions = ({ session: { origin } }: { session: Session }) => {
+    const result: Web3WalletPermission[] = [];
+    if (getConnectedDappSnapshot(origin)) {
+      result.push({ parentCapability: 'eth_accounts' });
+    }
+    return result;
+  };
+
+  /**
+   * https://github.com/MetaMask/metamask-improvement-proposals/blob/main/MIPs/mip-2.md
+   */
+  @Reflect.metadata('SAFE', true)
+  walletRevokePermissions = ({ session: { origin }, data: { params } }) => {
+    if (getConnectedDappSnapshot(origin)) {
+      if (params?.[0] && 'eth_accounts' in params[0]) {
+        broadcastSessionEventSync(BroadcastEvent.accountsChanged, [], origin);
+        disconnectDappSync(origin);
+      }
+    }
+    return null;
+  };
+
+  personalEcRecover = ({
+    data: {
+      params: [data, sig, extra = {}],
+    },
+  }: {
+    data: {
+      params: [string, string, any];
+    };
+  }) => {
+    return recoverPersonalSignature({
+      ...extra,
+      data,
+      sig,
+    });
+  };
+
+  @Reflect.metadata('SAFE', true)
+  netListening = () => {
+    return true;
+  };
+
+  @Reflect.metadata('PRIVATE', true)
+  private _checkAddress = async (address: string, req: any) => {
+    // eslint-disable-next-line prefer-const
+    let { address: currentAddress, type } = req.account || {};
+    currentAddress = currentAddress?.toLowerCase();
+    if (
+      !currentAddress ||
+      currentAddress !== normalizeAddress(address)?.toLowerCase()
+    ) {
+      throw ethErrors.rpc.invalidParams({
+        message:
+          'Invalid parameters: must use the current user address to sign',
+      });
+    }
+    const keyring = await keyringServiceApi.getKeyringForAccount(
+      currentAddress,
+      type,
+    );
+
+    return keyring;
+  };
+
+  ethGetTransactionReceipt = async req => {
+    try {
+      const res = await this.ethRpc(req);
+      return res;
+    } catch (e: any) {
+      const idxKeyPhrases = ['index', 'progress'];
+      if (idxKeyPhrases.some(phrase => e.message?.includes(phrase))) {
+        return null;
+      } else {
+        throw e;
+      }
+    }
+  };
+}
+
+export default new ProviderController();
