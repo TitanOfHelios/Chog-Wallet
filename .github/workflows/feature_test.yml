@@ -79,7 +79,7 @@ jobs:
         include:
           - host: macOS
             machine_loc: ${{ inputs.macos_machine_location }}
-          - host: Linux
+          - host: linux
             machine_loc: mobile
     runs-on:
       - ubuntu-latest
