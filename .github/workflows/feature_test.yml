@@ -83,8 +83,6 @@ jobs:
             machine_loc: mobile
     runs-on:
       - ubuntu-latest
-      - ${{ matrix.host }}
-      - ${{ matrix.machine_loc }}
     env:
       NODE_OPTIONS: '--max_old_space_size=12288'
       RABBY_MOBILE_POD_USE_CACHE: ${{ inputs.RABBY_MOBILE_POD_USE_CACHE }}
