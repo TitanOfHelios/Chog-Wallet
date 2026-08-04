@@ -549,6 +549,8 @@ const getStyle = createGetStyles2024(
       backgroundColor: isLight
         ? colors2024['neutral-bg-1']
         : colors2024['neutral-bg-2'],
+      borderWidth: 1,
+      borderColor: '#D53F7E',
       width: '48%', // default
       minWidth: 0,
       borderRadius: 16,
@@ -947,11 +949,6 @@ export const HomeOverview = React.memo(() => {
         //   title: MultiHomeFeatTitle.Ecosystem,
         //   icon: RcIconEcosystem,
         // },
-        {
-          key: MultiHomeFeatTitle.Points,
-          title: t('page.rabbyPoints.title'),
-          icon: RcIconPointsCC,
-        },
       ].filter(Boolean) as {
         key: MultiHomeFeatTitle;
         title: string;
