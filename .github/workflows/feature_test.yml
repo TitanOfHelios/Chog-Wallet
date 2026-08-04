@@ -82,7 +82,7 @@ jobs:
           - host: Linux
             machine_loc: mobile
     runs-on:
-      - self-hosted
+      - ubuntu-latest
       - ${{ matrix.host }}
       - ${{ matrix.machine_loc }}
     env:
